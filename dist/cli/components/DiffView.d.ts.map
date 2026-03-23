@@ -1,0 +1,1 @@
+{"version":3,"file":"DiffView.d.ts","sourceRoot":"","sources":["../../../src/cli/components/DiffView.tsx"],"names":[],"mappings":"AAAA,OAAO,KAAmB,MAAM,OAAO,CAAC;AAExC,OAAO,KAAK,EAAE,SAAS,EAAE,MAAM,oBAAoB,CAAC;AAGpD,UAAU,aAAa;IACrB,UAAU,EAAE,SAAS,EAAE,CAAC;IACxB,OAAO,EAAE,MAAM,IAAI,CAAC;CACrB;AAyID,wBAAgB,QAAQ,CAAC,EAAE,UAAU,EAAE,OAAO,EAAE,EAAE,aAAa,GAAG,KAAK,CAAC,YAAY,CAsGnF"}

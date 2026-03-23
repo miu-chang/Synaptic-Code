@@ -1,0 +1,188 @@
+# Synaptic Code ライセンス実装計画
+
+## 概要
+- Booth 販売 → 手動キー発行 → オンライン検証
+- 無制限台数（1ライセンス = 1人）
+- 不正検知 & キー失効機能
+
+## バックエンド
+kawaii-agent-backend に追加（Vercel + Neon 既存利用）
+
+### 新規エンドポイント
+```
+/api/synaptic/verify.js      - ライセンス検証
+/api/synaptic/activate.js    - アクティベーション（初回のみ）
+/api/synaptic/admin/create.js - ライセンス発行（管理者用）
+/api/synaptic/admin/revoke.js - ライセンス失効（管理者用）
+/api/synaptic/admin/list.js   - ライセンス一覧（管理者用）
+```
+
+### DBスキーマ (schema-synaptic.sql)
+```sql
+CREATE TABLE IF NOT EXISTS synaptic_licenses (
+  license_key VARCHAR(50) PRIMARY KEY,
+  email VARCHAR(255),
+  plan VARCHAR(20) DEFAULT 'standard',  -- standard / pro
+  status VARCHAR(20) DEFAULT 'active',  -- active / revoked / expired
+  expires_at TIMESTAMP,                  -- NULL = 永久
+  created_at TIMESTAMP DEFAULT NOW(),
+  activated_at TIMESTAMP,
+  last_verified_at TIMESTAMP,
+  notes TEXT                            -- 管理メモ
+);
+
+CREATE TABLE IF NOT EXISTS synaptic_verifications (
+  id SERIAL PRIMARY KEY,
+  license_key VARCHAR(50) REFERENCES synaptic_licenses(license_key),
+  ip_address VARCHAR(45),
+  machine_hash VARCHAR(64),
+  verified_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 異常検知用インデックス
+CREATE INDEX idx_synaptic_ip ON synaptic_verifications(ip_address);
+CREATE INDEX idx_synaptic_machine ON synaptic_verifications(machine_hash);
+CREATE INDEX idx_synaptic_license ON synaptic_verifications(license_key);
+```
+
+## API仕様
+
+### POST /api/synaptic/verify
+リクエスト:
+```json
+{
+  "licenseKey": "XXXX-XXXX-XXXX-XXXX",
+  "machineHash": "abc123..."  // optional
+}
+```
+レスポンス (成功):
+```json
+{
+  "valid": true,
+  "plan": "standard",
+  "expiresAt": null
+}
+```
+レスポンス (失敗):
+```json
+{
+  "valid": false,
+  "error": "License revoked" | "License expired" | "Invalid license"
+}
+```
+
+### POST /api/synaptic/activate
+リクエスト:
+```json
+{
+  "licenseKey": "XXXX-XXXX-XXXX-XXXX",
+  "email": "user@example.com"  // optional
+}
+```
+レスポンス:
+```json
+{
+  "success": true,
+  "message": "License activated"
+}
+```
+
+### POST /api/synaptic/admin/create (要認証)
+リクエスト:
+```json
+{
+  "plan": "standard",
+  "email": "buyer@example.com",
+  "expiresAt": null,
+  "notes": "Booth購入 2024-03-23"
+}
+```
+レスポンス:
+```json
+{
+  "licenseKey": "SYN1-XXXX-XXXX-XXXX",
+  "created": true
+}
+```
+
+## クライアント側 (Synaptic Code)
+
+### フロー
+```
+起動時:
+1. ローカルキャッシュ確認 (~/.synaptic-code/license.json)
+2. キャッシュあり & 7日以内に検証済み → オフライン許可
+3. キャッシュなし or 古い → オンライン検証
+   - 成功 → キャッシュ更新、起動
+   - 失敗 → ライセンス入力画面
+   - サーバー接続不可 → キャッシュ有効なら起動、なければエラー
+
+初回アクティベーション:
+1. ライセンスキー入力
+2. /api/synaptic/activate 呼び出し
+3. 成功 → キャッシュ保存、起動
+```
+
+### キャッシュ形式 (~/.synaptic-code/license.json)
+```json
+{
+  "key": "SYN1-XXXX-XXXX-XXXX",
+  "plan": "standard",
+  "activatedAt": 1711180800000,
+  "lastVerified": 1711180800000,
+  "expiresAt": null
+}
+```
+
+## 不正検知
+
+### 自動検知
+- 同一キーが24時間以内に10+のユニークIPから検証 → フラグ
+- 管理画面で確認 → 必要なら revoke
+
+### 手動対応
+- 不正報告あり → /api/synaptic/admin/revoke で失効
+- 正規ユーザーには新キー発行
+
+## キー形式
+```
+SYN1-XXXX-XXXX-CCCC
+│    │         │
+│    │         └─ チェックサム (SHA256の先頭4文字)
+│    └─ ランダム (8文字)
+└─ プレフィックス (SYN1 = Synaptic Code v1)
+```
+
+## 実装順序
+
+### Phase 1: バックエンド
+1. [ ] schema-synaptic.sql 作成 & Neon で実行
+2. [ ] lib/synaptic-db.js 作成
+3. [ ] /api/synaptic/verify.js 作成
+4. [ ] /api/synaptic/activate.js 作成
+5. [ ] /api/synaptic/admin/* 作成
+6. [ ] Vercel にデプロイ
+
+### Phase 2: クライアント
+1. [ ] src/license/index.ts をオンライン対応に修正
+2. [ ] 起動時の検証フロー実装
+3. [ ] ライセンス入力UI実装
+4. [ ] オフラインキャッシュ実装
+5. [ ] npm run build
+
+### Phase 3: テスト
+1. [ ] テストキーで検証フロー確認
+2. [ ] オフライン動作確認
+3. [ ] 失効テスト
+
+## 管理運用
+
+### Booth購入時
+1. 購入通知を受け取る
+2. /api/synaptic/admin/create でキー発行
+3. キーを購入者にメッセージで送付
+
+### 不正発覚時
+1. 管理画面で異常検知確認
+2. /api/synaptic/admin/revoke でキー失効
+3. 必要なら正規ユーザーに新キー発行
