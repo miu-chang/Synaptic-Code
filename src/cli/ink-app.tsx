@@ -63,8 +63,8 @@ function wrapStdoutWithSync(): () => void {
 }
 
 export async function startInkApp(config: InkAppConfig): Promise<void> {
-  // Disabled synchronized output - was causing double rendering issues
-  // const cleanup = wrapStdoutWithSync();
+  // Enable synchronized output to prevent flickering (DEC Mode 2026)
+  const cleanup = wrapStdoutWithSync();
 
   const { waitUntilExit } = render(
     <App
@@ -82,5 +82,5 @@ export async function startInkApp(config: InkAppConfig): Promise<void> {
   );
 
   await waitUntilExit();
-  // cleanup();
+  cleanup();
 }
