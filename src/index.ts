@@ -174,7 +174,7 @@ async function checkLicenseOnStartup(): Promise<LicenseInfo | null> {
   console.log(chalk.dim(` v${getCurrentVersion()} • Local LLM Coding Assistant`));
   console.log('');
 
-  const PURCHASE_URL = 'https://synaptic-ai.net';
+  const PURCHASE_URL = 'https://miu-chang.booth.pm/items/8160110';
 
   if (isTrial) {
     console.log(chalk.yellow(` ⏳ ${format(L.trialDaysRemaining, { days: String(status.trialDays) })}\n`));
