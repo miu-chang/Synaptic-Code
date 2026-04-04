@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { getCurrentVersion } from '../version/index.js';
 
 export const BANNER = `
 ${chalk.cyan('  ╦   ╔═╗╔═╗╔═╗╦    ╔═╗╔═╗╔╦╗╔═╗')}
@@ -29,7 +30,7 @@ ${chalk.blue('   ╚═════╝ ╚═════╝ ╚═════�
 `;
 
 export const BANNER_MINIMAL = `
-${chalk.bold.cyan('  ⚡ Local Code')} ${chalk.dim('v0.1.0')}
+${chalk.bold.cyan('  ⚡ Local Code')} ${chalk.dim(`v${getCurrentVersion()}`)}
 `;
 
 export const BANNER_GRADIENT = `

@@ -26,16 +26,28 @@ import { startInkApp } from './cli/ink-app.js';
 import * as lms from './lms/client.js';
 import { runSetupWizard, isFirstRun } from './cli/setup.js';
 import * as apiServer from './server/index.js';
-import { getLicenseStatus, hasValidAccess, startTrial, activateLicense, type LicenseInfo } from './license/index.js';
+import { getLicenseStatus, getLicenseStatusAsync, hasValidAccess, startTrial, activateLicense, verifyCodeIntegrity, type LicenseInfo } from './license/index.js';
 import { t, format, setLanguage, detectSystemLanguage } from './i18n/index.js';
 import * as readline from 'readline';
+import { Agent } from './core/agent.js';
+import { ConversationManager } from './core/conversation.js';
+import { getCurrentVersion } from './version/index.js';
 
 const program = new Command();
 
 program
   .name('synaptic')
   .description('Synaptic Code - Local LLM-powered coding assistant')
-  .version('0.1.0');
+  .version('0.1.2')
+  .option('-p, --prompt <prompt>', 'Run in non-interactive mode with the given prompt')
+  .option('-c, --continue', 'Continue the most recent conversation')
+  .option('-r, --resume [id]', 'Resume a specific conversation (shows list if no id)')
+  .option('--append-system-prompt <text>', 'Append text to system prompt (non-interactive mode)')
+  .option('-m, --model <model>', 'Override the model')
+  .option('--max-turns <turns>', 'Maximum agent iterations (default: 30)', '30')
+  .option('--output-format <format>', 'Output format: text, json, stream (default: text)', 'text')
+  .option('--unload-after', 'Unload model after completion (LM Studio only)')
+  .option('--skip-license', 'Skip license check');
 
 /**
  * Ensure LM Studio server is ready before starting chat
@@ -113,7 +125,19 @@ async function checkLicenseOnStartup(): Promise<LicenseInfo | null> {
   setLanguage(detectSystemLanguage());
   const L = t().license;
 
-  const status = getLicenseStatus();
+  // FIRST: Always verify code integrity before anything else
+  const integrityResult = await verifyCodeIntegrity();
+  if (!integrityResult.valid) {
+    console.log(chalk.red('\n  ⚠️  Code integrity check failed. Please reinstall from official source.'));
+    console.log(chalk.red('  Download: https://synaptic.app/download\n'));
+    if (integrityResult.tamperedFiles) {
+      console.log(chalk.red(`  Tampered files: ${integrityResult.tamperedFiles.join(', ')}\n`));
+    }
+    process.exit(1);  // Hard exit - no bypass allowed
+  }
+
+  // Now check license status
+  const status = await getLicenseStatusAsync();
 
   if (status.status === 'valid') {
     return status;
@@ -147,7 +171,7 @@ async function checkLicenseOnStartup(): Promise<LicenseInfo | null> {
   console.log('');
   console.log(chalk.cyan(` ${BORDER}`));
   console.log('');
-  console.log(chalk.dim(' v0.1.0 • Local LLM Coding Assistant'));
+  console.log(chalk.dim(` v${getCurrentVersion()} • Local LLM Coding Assistant`));
   console.log('');
 
   const PURCHASE_URL = 'https://synaptic-ai.net';
@@ -245,6 +269,8 @@ program
   .option('-p, --provider <provider>', 'Use specific provider (ollama, lmstudio, openai-local, openai, anthropic, google)')
   .option('-r, --remote <url>', 'Connect to remote Synaptic server (e.g., http://server:8080)')
   .option('-k, --api-key <key>', 'API key for remote server')
+  .option('-c, --continue', 'Continue the most recent conversation')
+  .option('-R, --resume [id]', 'Resume a specific conversation (shows list if no id)')
   .option('--skip-license', 'Skip license check (development only)')
   .action(async (options) => {
     // Check license first (unless skipped)
@@ -287,7 +313,16 @@ program
       tools.registerMultiple(todoTools);
       if (synapticTools.length > 0) tools.registerMultiple(synapticTools);
 
-      await startInkApp({ settings, client, tools, licenseStatus, isGitRepo, synapticStatus });
+      await startInkApp({
+        settings,
+        client,
+        tools,
+        licenseStatus,
+        isGitRepo,
+        synapticStatus,
+        continueSession: options.continue,
+        resumeSessionId: typeof options.resume === 'string' ? options.resume : undefined,
+      });
       return;
     }
 
@@ -303,7 +338,16 @@ program
       tools.registerMultiple(todoTools);
       if (synapticTools.length > 0) tools.registerMultiple(synapticTools);
 
-      await startInkApp({ settings, client, tools, licenseStatus, isGitRepo, synapticStatus });
+      await startInkApp({
+        settings,
+        client,
+        tools,
+        licenseStatus,
+        isGitRepo,
+        synapticStatus,
+        continueSession: options.continue,
+        resumeSessionId: typeof options.resume === 'string' ? options.resume : undefined,
+      });
       return;
     }
 
@@ -389,7 +433,17 @@ program
     tools.registerMultiple(todoTools);
     if (synapticTools.length > 0) tools.registerMultiple(synapticTools);
 
-    await startInkApp({ settings, client, tools, licenseStatus, isGitRepo, synapticStatus, initialMessages });
+    await startInkApp({
+      settings,
+      client,
+      tools,
+      licenseStatus,
+      isGitRepo,
+      synapticStatus,
+      initialMessages,
+      continueSession: options.continue,
+      resumeSessionId: typeof options.resume === 'string' ? options.resume : undefined,
+    });
   });
 
 program
@@ -681,6 +735,116 @@ program
     await runSetupWizard();
   });
 
+// Install command - install to system PATH
+program
+  .command('install')
+  .description('Install Synaptic Code to system PATH (makes synaptic/syn available globally)')
+  .action(async () => {
+    const { platform, homedir } = await import('os');
+    const { existsSync, mkdirSync, copyFileSync, symlinkSync, unlinkSync, appendFileSync, readFileSync } = await import('fs');
+    const { join, dirname } = await import('path');
+    const { execSync } = await import('child_process');
+
+    const os = platform();
+    const home = homedir();
+    const execPath = process.execPath; // Current executable path
+
+    console.log(chalk.bold('\n  Synaptic Code Installer\n'));
+
+    if (os === 'win32') {
+      // Windows installation
+      const installDir = join(home, 'AppData', 'Local', 'Synaptic');
+      const synapticPath = join(installDir, 'synaptic.exe');
+      const synPath = join(installDir, 'syn.exe');
+
+      try {
+        // Create install directory
+        if (!existsSync(installDir)) {
+          mkdirSync(installDir, { recursive: true });
+        }
+
+        // Copy executable
+        console.log(chalk.dim(`  Copying to ${installDir}...`));
+        copyFileSync(execPath, synapticPath);
+        copyFileSync(execPath, synPath);
+
+        // Add to PATH via PowerShell
+        console.log(chalk.dim('  Adding to PATH...'));
+        try {
+          const currentPath = execSync('powershell -Command "[Environment]::GetEnvironmentVariable(\'Path\', \'User\')"', { encoding: 'utf8' }).trim();
+          if (!currentPath.includes(installDir)) {
+            execSync(`powershell -Command "[Environment]::SetEnvironmentVariable('Path', '${currentPath};${installDir}', 'User')"`, { stdio: 'ignore' });
+          }
+        } catch {
+          console.log(chalk.yellow('  Could not automatically add to PATH.'));
+          console.log(chalk.dim(`  Please add manually: ${installDir}`));
+        }
+
+        console.log(chalk.green('\n  ✓ Installation complete!'));
+        console.log(chalk.dim('\n  Restart your terminal, then run:'));
+        console.log(chalk.cyan('    synaptic'));
+        console.log(chalk.dim('  or'));
+        console.log(chalk.cyan('    syn\n'));
+
+      } catch (err) {
+        console.error(chalk.red(`\n  Installation failed: ${err instanceof Error ? err.message : err}\n`));
+        process.exit(1);
+      }
+
+    } else {
+      // macOS / Linux installation
+      const installDir = join(home, '.local', 'bin');
+      const synapticPath = join(installDir, 'synaptic');
+      const synPath = join(installDir, 'syn');
+
+      try {
+        // Create install directory
+        if (!existsSync(installDir)) {
+          mkdirSync(installDir, { recursive: true });
+        }
+
+        // Copy executable
+        console.log(chalk.dim(`  Copying to ${installDir}...`));
+        copyFileSync(execPath, synapticPath);
+        execSync(`chmod +x "${synapticPath}"`);
+
+        // Create symlink for 'syn'
+        if (existsSync(synPath)) {
+          unlinkSync(synPath);
+        }
+        symlinkSync(synapticPath, synPath);
+
+        // Add to PATH if needed
+        const shell = process.env.SHELL || '/bin/bash';
+        const rcFile = shell.includes('zsh') ? join(home, '.zshrc') : join(home, '.bashrc');
+        const pathLine = `export PATH="$HOME/.local/bin:$PATH"`;
+
+        let rcContent = '';
+        try {
+          rcContent = readFileSync(rcFile, 'utf8');
+        } catch {
+          // File doesn't exist, will create
+        }
+
+        if (!rcContent.includes('.local/bin')) {
+          console.log(chalk.dim(`  Adding to PATH in ${rcFile}...`));
+          appendFileSync(rcFile, `\n# Synaptic Code\n${pathLine}\n`);
+        }
+
+        console.log(chalk.green('\n  ✓ Installation complete!'));
+        console.log(chalk.dim('\n  Restart your terminal (or run: source ' + rcFile + ')'));
+        console.log(chalk.dim('  Then run:'));
+        console.log(chalk.cyan('    synaptic'));
+        console.log(chalk.dim('  or'));
+        console.log(chalk.cyan('    syn\n'));
+
+      } catch (err) {
+        console.error(chalk.red(`\n  Installation failed: ${err instanceof Error ? err.message : err}\n`));
+        process.exit(1);
+      }
+    }
+  });
+
 // Serve command - API server mode
 program
   .command('serve')
@@ -780,7 +944,62 @@ program
   });
 
 // Default to chat if no command specified (or setup if first run)
+// Handle -p (non-interactive mode) in default action
 program.action(async () => {
+  const opts = program.opts() as {
+    prompt?: string;
+    continue?: boolean;
+    resume?: string | boolean;
+    model?: string;
+    maxTurns?: string;
+    outputFormat?: string;
+    unloadAfter?: boolean;
+    skipLicense?: boolean;
+  };
+
+  // Non-interactive mode with -p
+  if (opts.prompt) {
+    await runHeadlessMode(opts as Required<Pick<typeof opts, 'prompt'>> & typeof opts);
+    return;
+  }
+
+  // Check if running from downloaded binary (not installed)
+  const { platform, homedir } = await import('os');
+  const { existsSync } = await import('fs');
+  const { join } = await import('path');
+
+  const os = platform();
+  const home = homedir();
+  const isWindows = os === 'win32';
+
+  // Check if already installed
+  const installedPath = isWindows
+    ? join(home, 'AppData', 'Local', 'Synaptic', 'synaptic.exe')
+    : join(home, '.local', 'bin', 'synaptic');
+
+  const isInstalled = existsSync(installedPath);
+  const isRunningFromInstalled = process.execPath === installedPath;
+
+  // If not installed and running standalone binary, offer to install
+  if (!isInstalled && !isRunningFromInstalled && process.execPath.includes('synaptic')) {
+    console.log(chalk.bold('\n  Synaptic Code\n'));
+    console.log(chalk.dim('  It looks like you\'re running Synaptic Code for the first time.'));
+    console.log(chalk.dim('  Would you like to install it so you can run it from anywhere?\n'));
+
+    const answer = await prompt(chalk.cyan('  Install now? [Y/n] '));
+    const choice = answer.toLowerCase().trim();
+
+    if (choice === '' || choice === 'y' || choice === 'yes') {
+      // Run install command
+      const installCmd = program.commands.find((c) => c.name() === 'install');
+      if (installCmd) {
+        await installCmd.parseAsync(['node', 'synaptic', 'install']);
+      }
+      return;
+    }
+    console.log(chalk.dim('\n  Skipping installation. You can install later with: ./synaptic install\n'));
+  }
+
   // Check for first run
   if (isFirstRun()) {
     console.log(chalk.dim('\n  First time setup detected...\n'));
@@ -790,10 +1009,220 @@ program.action(async () => {
     }
   }
 
+  // Build chat arguments for continue/resume
+  const chatArgs = ['node', 'synaptic', 'chat'];
+  if (opts.continue) {
+    chatArgs.push('--continue');
+  }
+  if (opts.resume) {
+    chatArgs.push('--resume');
+    if (typeof opts.resume === 'string') {
+      chatArgs.push(opts.resume);
+    }
+  }
+  if (opts.model) {
+    chatArgs.push('--model', opts.model);
+  }
+
   const chatCmd = program.commands.find((c) => c.name() === 'chat');
   if (chatCmd) {
-    await chatCmd.parseAsync(['node', 'synaptic', 'chat']);
+    await chatCmd.parseAsync(chatArgs);
   }
 });
+
+/**
+ * Run in headless/non-interactive mode
+ */
+async function runHeadlessMode(opts: {
+  prompt: string;
+  model?: string;
+  maxTurns?: string;
+  outputFormat?: string;
+  unloadAfter?: boolean;
+  skipLicense?: boolean;
+  continue?: boolean;
+  resume?: string | boolean;
+  appendSystemPrompt?: string;
+}) {
+  const { prompt, model, maxTurns, outputFormat, unloadAfter, skipLicense, appendSystemPrompt } = opts;
+  const maxIterations = parseInt(maxTurns || '30');
+  const format = outputFormat || 'text';
+
+  // License check (unless skipped)
+  if (!skipLicense) {
+    if (!hasValidAccess()) {
+      const status = getLicenseStatus();
+      if (format === 'json') {
+        console.log(JSON.stringify({ error: 'No valid license', status: status.status }));
+      } else {
+        console.error(chalk.red('No valid license. Run `synaptic` to activate.'));
+      }
+      process.exit(1);
+    }
+  }
+
+  const settings = loadSettings();
+
+  // Override model if specified
+  if (model) {
+    setProviderModel(settings, model);
+  }
+
+  // Ensure LM Studio is ready
+  const ready = await ensureLmsReady(settings);
+  if (!ready) {
+    if (format === 'json') {
+      console.log(JSON.stringify({ error: 'LM Studio not ready' }));
+    }
+    process.exit(1);
+  }
+
+  // Load model if needed (for lmstudio)
+  if (settings.provider === 'lmstudio') {
+    const loadedModels = lms.listLoadedModels();
+    if (loadedModels.length === 0) {
+      const targetModel = model || settings.providers.lmstudio.model;
+      if (targetModel) {
+        const contextLength = Math.round(settings.maxContextTokens * 1.1);
+        if (format !== 'json') {
+          process.stderr.write(chalk.dim(`Loading model: ${targetModel}...`));
+        }
+        const result = await lms.loadModel(targetModel, { contextLength });
+        if (!result.success) {
+          if (format === 'json') {
+            console.log(JSON.stringify({ error: `Failed to load model: ${result.message}` }));
+          } else {
+            console.error(chalk.red(`\nFailed to load model: ${result.message}`));
+          }
+          process.exit(1);
+        }
+        if (format !== 'json') {
+          process.stderr.write(chalk.green(' OK\n'));
+        }
+      }
+    }
+  }
+
+  // Create client and tools
+  const { baseUrlOrApiKey, model: clientModel } = getClientArgs(settings);
+  const client = createClient(settings.provider, baseUrlOrApiKey, model || clientModel);
+
+  const tools = new ToolRegistry();
+  tools.registerMultiple(fileTools);
+  tools.registerMultiple(bashTools);
+  tools.registerMultiple(webTools);
+  tools.registerMultiple(todoTools);
+
+  // Initialize Synaptic ecosystem
+  const synaptic = await import('./synaptic/index.js');
+  const { tools: synapticTools } = await synaptic.initSynaptic();
+  if (synapticTools.length > 0) tools.registerMultiple(synapticTools);
+
+  // Build context from previous session if continuing
+  let contextPrompt = prompt;
+  const conversationManager = new ConversationManager(settings);
+
+  if (opts.continue || opts.resume) {
+    let loaded = false;
+    if (typeof opts.resume === 'string') {
+      // Resume specific session
+      const conv = conversationManager.load(opts.resume);
+      if (conv) loaded = true;
+    } else if (opts.continue) {
+      // Continue most recent
+      const conv = conversationManager.loadMostRecent();
+      if (conv) loaded = true;
+    }
+
+    if (loaded) {
+      const conv = conversationManager.getCurrent();
+      if (conv && conv.messages.length > 1) {
+        // Build context summary from previous messages
+        const contextParts: string[] = [];
+        contextParts.push('[Previous conversation context]');
+
+        for (const msg of conv.messages) {
+          if (msg.role === 'user') {
+            const content = typeof msg.content === 'string' ? msg.content : '[complex content]';
+            contextParts.push(`User: ${content.slice(0, 500)}${content.length > 500 ? '...' : ''}`);
+          } else if (msg.role === 'assistant' && msg.content) {
+            const content = typeof msg.content === 'string' ? msg.content : '';
+            if (content) {
+              contextParts.push(`Assistant: ${content.slice(0, 500)}${content.length > 500 ? '...' : ''}`);
+            }
+          }
+        }
+
+        contextParts.push('[End of previous context]');
+        contextParts.push('');
+        contextParts.push('Continue with the following task:');
+        contextParts.push(prompt);
+
+        contextPrompt = contextParts.join('\n');
+
+        if (format !== 'json') {
+          process.stderr.write(chalk.dim(`Continuing session: ${conv.title.slice(0, 40)}...\n`));
+        }
+      }
+    } else {
+      if (format !== 'json') {
+        process.stderr.write(chalk.yellow('No previous session found, starting fresh.\n'));
+      }
+    }
+  }
+
+  // Create and run agent
+  const agent = new Agent(client, model || clientModel, tools, {
+    maxIterations,
+    stopOnError: false,
+    verbose: format === 'stream',
+    appendSystemPrompt,
+  });
+
+  // Event handler for streaming output
+  if (format === 'stream') {
+    agent.onStep((step) => {
+      console.log(JSON.stringify(step));
+    });
+  }
+
+  if (format !== 'json') {
+    process.stderr.write(chalk.dim(`\nRunning: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}\n\n`));
+  }
+
+  const state = await agent.run(contextPrompt);
+
+  // Output result
+  if (format === 'json') {
+    console.log(JSON.stringify({
+      status: state.status,
+      result: state.result,
+      error: state.error,
+      iterations: state.iterations,
+      steps: state.steps.length,
+      duration: state.completedAt ? state.completedAt - state.startedAt : 0,
+    }));
+  } else if (format === 'text') {
+    if (state.status === 'completed') {
+      console.log(state.result || 'Task completed.');
+    } else {
+      console.error(chalk.red(`Failed: ${state.error || 'Unknown error'}`));
+    }
+  }
+  // 'stream' format already outputs via event handler
+
+  // Unload model if requested
+  if (unloadAfter && settings.provider === 'lmstudio') {
+    if (format !== 'json') {
+      process.stderr.write(chalk.dim('Unloading model...'));
+    }
+    await lms.unloadModel(true);
+    if (format !== 'json') {
+      process.stderr.write(chalk.green(' OK\n'));
+    }
+  }
+
+  process.exit(state.status === 'completed' ? 0 : 1);
+}
 
 program.parse();

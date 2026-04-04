@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { useScrollPaused } from './ScrollContext.js';
 import { type LicenseInfo } from '../../license/index.js';
+import { getCurrentVersion } from '../../version/index.js';
 
-const VERSION = '0.1.0';
+const VERSION = getCurrentVersion();
 
 const BORDER = '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
 

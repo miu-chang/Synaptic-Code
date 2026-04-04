@@ -11,6 +11,7 @@ export interface PlanItem {
   action: string;
   tool?: string;
   status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed';
+  outsideProject?: boolean;  // Warning for operations outside project root
 }
 
 interface PlanViewProps {
@@ -56,7 +57,7 @@ export function PlanView({ items, onApprove, onApproveAll, onReject }: PlanViewP
 
       {items.map((item, idx) => {
         const isSelected = pendingItems[selectedIndex]?.id === item.id;
-        const statusIcon = {
+        const statusIcon = item.outsideProject ? '⚠' : {
           pending: '○',
           approved: '✓',
           rejected: '✗',
@@ -64,7 +65,7 @@ export function PlanView({ items, onApprove, onApproveAll, onReject }: PlanViewP
           completed: '●',
         }[item.status];
 
-        const statusColor = {
+        const statusColor = item.outsideProject ? 'red' : {
           pending: isSelected ? 'cyan' : 'gray',
           approved: 'green',
           rejected: 'red',
@@ -73,18 +74,25 @@ export function PlanView({ items, onApprove, onApproveAll, onReject }: PlanViewP
         }[item.status];
 
         return (
-          <Box key={item.id} paddingLeft={1}>
-            <Text color={statusColor}>
-              {isSelected && item.status === 'pending' ? '❯ ' : '  '}
-              {statusIcon}
-            </Text>
-            <Text color={item.status === 'pending' ? undefined : 'gray'}>
-              {item.action}
-            </Text>
-            {item.tool && (
-              <Text color="yellow" dimColor={item.status !== 'pending'}>
-                {' '}[{item.tool}]
+          <Box key={item.id} paddingLeft={1} flexDirection="column">
+            <Box>
+              <Text color={statusColor}>
+                {isSelected && item.status === 'pending' ? '❯ ' : '  '}
+                {statusIcon}
               </Text>
+              <Text color={item.outsideProject ? 'red' : (item.status === 'pending' ? undefined : 'gray')}>
+                {item.action}
+              </Text>
+              {item.tool && (
+                <Text color="yellow" dimColor={item.status !== 'pending'}>
+                  {' '}[{item.tool}]
+                </Text>
+              )}
+            </Box>
+            {item.outsideProject && (
+              <Box paddingLeft={4}>
+                <Text color="red" bold>↳ OUTSIDE PROJECT</Text>
+              </Box>
             )}
           </Box>
         );

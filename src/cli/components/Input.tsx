@@ -1,8 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { getCommands } from './CommandPalette.js';
 import { useScrollPaused } from './ScrollContext.js';
+import { loadCustomCommands } from '../../core/custom-commands.js';
 
 // Animated dots with elapsed time: Processing... (5s)
 function AnimatedDots({ startedAt }: { startedAt?: number }): React.ReactElement {
@@ -57,14 +58,18 @@ function formatDisplayValue(value: string): { display: string; isTruncated: bool
   return { display: value, isTruncated: false, lineCount };
 }
 
-// Filter commands based on partial input
-function getMatchingCommands(input: string) {
+// Filter commands based on partial input (includes custom commands)
+function getMatchingCommands(input: string, customCommands: Array<{ name: string; description: string; isCustom: boolean }>) {
   if (!input.startsWith('/')) return [];
   const partial = input.slice(1).toLowerCase();
-  const commands = getCommands();
-  return commands.filter(cmd =>
+  const builtinCommands = getCommands();
+  const allCommands = [
+    ...builtinCommands,
+    ...customCommands.map(c => ({ ...c, shortcut: undefined })),
+  ];
+  return allCommands.filter(cmd =>
     cmd.name.startsWith(partial) ||
-    (cmd.shortcut && cmd.shortcut.startsWith(partial))
+    ('shortcut' in cmd && cmd.shortcut && cmd.shortcut.startsWith(partial))
   );
 }
 
@@ -78,7 +83,16 @@ export function Input({ onSubmit, placeholder = 'Type a message...', loading = f
   const [commandIndex, setCommandIndex] = useState(0);
   const savedInputRef = useRef(''); // Save current input when browsing history
 
-  const matchingCommands = getMatchingCommands(value);
+  // Load custom commands from synaptic/ directory
+  const customCommands = useMemo(() => {
+    return loadCustomCommands().map(cmd => ({
+      name: cmd.name,
+      description: `[custom] ${cmd.content.slice(0, 40)}...`,
+      isCustom: true,
+    }));
+  }, []);
+
+  const matchingCommands = getMatchingCommands(value, customCommands);
   const showCommandHints = value.startsWith('/') && matchingCommands.length > 0;
   const { display: displayValue, isTruncated } = formatDisplayValue(value);
 
@@ -203,20 +217,23 @@ export function Input({ onSubmit, placeholder = 'Type a message...', loading = f
       {/* Command hints - Claude Code style */}
       {showCommandHints && (
         <Box flexDirection="column" marginBottom={1} paddingX={1}>
-          {matchingCommands.map((cmd, i) => (
-            <Box key={cmd.name}>
-              <Text color={i === commandIndex ? 'cyan' : 'gray'}>
-                {i === commandIndex ? '❯ ' : '  '}
-              </Text>
-              <Text color={i === commandIndex ? 'cyan' : undefined} bold={i === commandIndex}>
-                /{cmd.name}
-              </Text>
-              {cmd.shortcut && (
-                <Text dimColor> [{cmd.shortcut}]</Text>
-              )}
-              <Text dimColor> - {cmd.description}</Text>
-            </Box>
-          ))}
+          {matchingCommands.map((cmd, i) => {
+            const isCustom = 'isCustom' in cmd && cmd.isCustom;
+            const shortcut = 'shortcut' in cmd ? cmd.shortcut : undefined;
+            return (
+              <Box key={cmd.name}>
+                <Text color={i === commandIndex ? 'cyan' : 'gray'}>
+                  {i === commandIndex ? '❯ ' : '  '}
+                </Text>
+                <Text color={i === commandIndex ? 'cyan' : (isCustom ? 'magenta' : undefined)} bold={i === commandIndex}>
+                  /{cmd.name}
+                </Text>
+                {isCustom ? <Text color="magenta"> [custom]</Text> : null}
+                {shortcut ? <Text dimColor> [{shortcut}]</Text> : null}
+                <Text dimColor> - {cmd.description.replace('[custom] ', '')}</Text>
+              </Box>
+            );
+          })}
           <Text dimColor>  ↑↓ select • Tab complete • Enter execute</Text>
         </Box>
       )}

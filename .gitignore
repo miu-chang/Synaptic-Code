@@ -20,3 +20,16 @@ dist/
 
 # Logs
 *.log
+
+# Release artifacts
+*.zip
+bin/
+Synaptic-Code-BOOTH/
+
+# Internal docs
+booth-update.json
+INPUT_CONTROL_IDEAS.md
+scripts/
+
+# Custom commands (user-specific)
+synaptic/

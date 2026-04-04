@@ -40,6 +40,8 @@ import { createClient } from '../../llm/client.js';
 import { undoManager } from '../../core/undo.js';
 import { Agent, type AgentState } from '../../core/agent.js';
 import { extractPlanFromToolCalls, shouldRequireApproval, type PlanStep } from '../../core/planner.js';
+import { isCustomCommand, executeCustomCommand, getCustomCommandNames } from '../../core/custom-commands.js';
+import { loadProjectConfig } from '../../core/project-config.js';
 import {
   initAgentTools,
   updateAgentModel,
@@ -50,6 +52,7 @@ import {
   type AgentCompletion,
 } from '../../tools/agent.js';
 import * as synaptic from '../../synaptic/index.js';
+import { isRestrictedMode } from '../../license/index.js';
 import { lmsTools, lmsEvents, type LmsDownloadProgress, type LmsModelChange } from '../../tools/lmstudio.js';
 import { ensureContextLength, listLoadedModels, loadModel, unloadModel } from '../../lms/client.js';
 import { t, format, setLanguage, type Language } from '../../i18n/index.js';
@@ -62,6 +65,8 @@ import {
   type ImageData,
 } from '../../utils/image.js';
 import type { ContentPart } from '../../llm/types.js';
+import { getFormattedChangelog } from '../../version/changelog.js';
+import { getCurrentVersion } from '../../version/index.js';
 
 type ViewMode = 'chat' | 'commands' | 'models' | 'help' | 'todo' | 'undo' | 'language' | 'provider' | 'agent' | 'approval' | 'history' | 'license' | 'timeline' | 'diff';
 
@@ -113,6 +118,8 @@ interface AppProps {
   isGitRepo?: boolean;
   synapticStatus?: string;
   initialMessages?: Array<{ type: 'info' | 'error'; content: string }>;
+  continueSession?: boolean;   // Continue most recent conversation
+  resumeSessionId?: string;    // Resume specific conversation by ID
 }
 
 interface DisplayMessage {
@@ -124,7 +131,7 @@ interface DisplayMessage {
   key?: number;  // For Static rendering
 }
 
-export function App({ settings: initialSettings, client: initialClient, tools, licenseStatus, isGitRepo: initialIsGitRepo, synapticStatus: initialSynapticStatus, initialMessages }: AppProps): React.ReactElement {
+export function App({ settings: initialSettings, client: initialClient, tools, licenseStatus, isGitRepo: initialIsGitRepo, synapticStatus: initialSynapticStatus, initialMessages, continueSession, resumeSessionId }: AppProps): React.ReactElement {
   const { exit } = useApp();
 
   // Set language from settings on mount
@@ -149,13 +156,45 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
     setTodoManager(tm);
     return tm;
   });
+  // Track if we resumed a session (for info message)
+  const [resumedSession, setResumedSession] = useState<{ id: string; title: string } | null>(null);
+
   const [conversationManager] = useState(() => {
     // Set language before creating conversation
     setLanguage(initialSettings.language);
     const cm = new ConversationManager(initialSettings);
-    cm.create(format(t().systemPrompt, { cwd: process.cwd(), date: getTodayDate() }));
+
+    // Try to restore session if requested
+    let restored = false;
+    if (resumeSessionId) {
+      const loaded = cm.load(resumeSessionId);
+      if (loaded) {
+        restored = true;
+        // Schedule state update after initial render
+        setTimeout(() => setResumedSession({ id: loaded.id, title: loaded.title }), 0);
+      }
+    } else if (continueSession) {
+      const loaded = cm.loadMostRecent();
+      if (loaded) {
+        restored = true;
+        setTimeout(() => setResumedSession({ id: loaded.id, title: loaded.title }), 0);
+      }
+    }
+
+    // Create new conversation if not restored
+    if (!restored) {
+      // Build system prompt with project config if available
+      let systemPrompt = format(t().systemPrompt, { cwd: process.cwd(), date: getTodayDate() });
+      const projectConfig = loadProjectConfig();
+      if (projectConfig) {
+        systemPrompt = `${systemPrompt}\n\n---\n\n# Project Guidelines (from SYNAPTIC.md)\n\n${projectConfig}`;
+      }
+      cm.create(systemPrompt);
+    }
+
     return cm;
   });
+  const [projectConfigLoaded] = useState(() => loadProjectConfig() !== null);
   const [streamingText, setStreamingText] = useState('');
   const [lastUsage, setLastUsage] = useState<{ prompt: number; completion: number } | null>(null);
   const [conversationTitle, setConversationTitle] = useState('Synaptic Code');
@@ -184,6 +223,50 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
       });
     });
   }, [initialIsGitRepo]);
+
+  // Restore display messages from resumed session
+  useEffect(() => {
+    if (resumedSession) {
+      const conv = conversationManager.getCurrent();
+      if (conv) {
+        // Convert stored messages to display messages
+        const displayMsgs: DisplayMessage[] = [];
+        let keyCounter = (initialMessages?.length ?? 0);
+
+        // Add info about session restoration
+        displayMsgs.push({
+          type: 'info',
+          content: `Resumed: ${resumedSession.title.slice(0, 50)}`,
+          key: keyCounter++,
+        });
+
+        // Add previous user/assistant messages (skip system messages)
+        for (const msg of conv.messages) {
+          if (msg.role === 'user') {
+            displayMsgs.push({
+              type: 'user',
+              content: typeof msg.content === 'string' ? msg.content : '[multimodal]',
+              key: keyCounter++,
+            });
+          } else if (msg.role === 'assistant' && msg.content) {
+            const text = getTextContent(msg.content);
+            if (text) {
+              displayMsgs.push({
+                type: 'assistant',
+                content: text,
+                key: keyCounter++,
+              });
+            }
+          }
+        }
+
+        setMessages((prev) => [...prev, ...displayMsgs]);
+
+        // Set conversation title
+        setConversationTitle(conv.title || 'Synaptic Code');
+      }
+    }
+  }, [resumedSession]);
 
   // Reset scroll pause when loading ends
   useEffect(() => {
@@ -216,6 +299,20 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
   useEffect(() => {
     setTerminalTitle('Synaptic Code');
     setTabActivity(true);
+
+    // Show project config loaded message
+    if (projectConfigLoaded) {
+      addMessage({ type: 'info', content: 'Loaded SYNAPTIC.md project guidelines' });
+    }
+
+    // Check if in restricted mode (offline > 3 days)
+    if (isRestrictedMode()) {
+      tools.setRestrictedMode(true);
+      addMessage({
+        type: 'error',
+        content: '⚠️ RESTRICTED MODE: Offline for over 3 days. File/bash/web tools are disabled. Please connect to the internet to verify your license.',
+      });
+    }
 
     // Initialize Synaptic ecosystem (discover Blender/Unity)
     // Skip if already provided via props to avoid re-render
@@ -323,7 +420,14 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
   }, []);
 
   function getSystemPrompt() {
-    return format(t().systemPrompt, { cwd: process.cwd(), date: getTodayDate() });
+    const basePrompt = format(t().systemPrompt, { cwd: process.cwd(), date: getTodayDate() });
+    const projectConfig = loadProjectConfig();
+
+    if (projectConfig) {
+      return `${basePrompt}\n\n---\n\n# Project Guidelines (from SYNAPTIC.md)\n\n${projectConfig}`;
+    }
+
+    return basePrompt;
   }
 
   const addMessage = useCallback((msg: DisplayMessage) => {
@@ -512,10 +616,31 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
 
     // Check for slash command
     if (input.startsWith('/')) {
-      const [cmdPart] = input.slice(1).split(/\s+/);
-      if (COMMAND_NAMES.has(cmdPart.toLowerCase())) {
+      const [cmdPart, ...cmdArgs] = input.slice(1).split(/\s+/);
+      const cmdName = cmdPart.toLowerCase();
+
+      // Check built-in commands first
+      if (COMMAND_NAMES.has(cmdName)) {
         await handleCommand(input.slice(1));
         return;
+      }
+
+      // Check custom commands (synaptic/*.md)
+      if (isCustomCommand(cmdName)) {
+        const args = cmdArgs.join(' ');
+        const result = executeCustomCommand(cmdName, args);
+
+        if (result.success) {
+          // Show info about custom command execution
+          addMessage({ type: 'info', content: `Running custom command: /${cmdName}` });
+
+          // Send the expanded prompt to LLM (reuse the rest of handleSubmit logic)
+          // We replace input with the expanded prompt and continue
+          input = result.prompt;
+        } else {
+          addMessage({ type: 'error', content: result.error });
+          return;
+        }
       }
       // Not a known command, treat as regular message (e.g., /path/to/file)
     }
@@ -968,6 +1093,13 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
         setViewMode('diff');
         break;
 
+      case 'changelog':
+        addMessage({
+          type: 'info',
+          content: `Synaptic Code v${getCurrentVersion()}\n${getFormattedChangelog()}`,
+        });
+        break;
+
       case 'license':
         setViewMode('license');
         break;
@@ -984,25 +1116,42 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
         const archDoc = `${synapticRoot}/ARCHITECTURE.md`;
 
         let docContent = '';
+        const loadedDocs: string[] = [];
         try {
           const fs = await import('fs');
           if (fs.existsSync(systemDoc)) {
             docContent += fs.readFileSync(systemDoc, 'utf-8');
+            loadedDocs.push('SYNAPTIC_SYSTEM.md');
           }
           if (fs.existsSync(archDoc)) {
             docContent += '\n\n---\n\n' + fs.readFileSync(archDoc, 'utf-8');
+            loadedDocs.push('ARCHITECTURE.md');
+          }
+
+          // Load custom commands info
+          const customCmds = getCustomCommandNames();
+          if (customCmds.length > 0) {
+            docContent += `\n\n---\n\n# Custom Commands\n\nThis project has custom slash commands in synaptic/:\n${customCmds.map(c => `- /${c}`).join('\n')}\n\nThese are defined as .md files in the synaptic/ directory.`;
+            loadedDocs.push(`${customCmds.length} custom commands`);
+          }
+
+          // Load project config (SYNAPTIC.md)
+          const projectCfg = loadProjectConfig();
+          if (projectCfg) {
+            docContent += `\n\n---\n\n# Project Config (SYNAPTIC.md)\n\n${projectCfg}`;
+            loadedDocs.push('SYNAPTIC.md');
           }
         } catch {
           docContent = 'Failed to read system documentation.';
         }
 
         // Add to conversation as system context
-        const selfPrompt = `You are now aware of your own implementation. Here is your system documentation:\n\n${docContent}\n\nYou can now:\n1. Modify your own code in ${synapticRoot}/src/\n2. Add new tools or features\n3. Fix bugs in your implementation\n4. Explain your architecture to the user`;
+        const selfPrompt = `You are now aware of your own implementation. Here is your system documentation:\n\n${docContent}\n\nYou can now:\n1. Modify your own code in ${synapticRoot}/src/\n2. Add new tools or features\n3. Fix bugs in your implementation\n4. Explain your architecture to the user\n5. Create custom commands in synaptic/*.md\n6. Update SYNAPTIC.md project guidelines`;
 
         conversationManager.addMessage({ role: 'user', content: selfPrompt });
         addMessage({
           type: 'info',
-          content: `Self-awareness mode activated.\nLoaded: SYNAPTIC_SYSTEM.md, ARCHITECTURE.md\nRoot: ${synapticRoot}\n\nYou can now ask me to modify my own code.`,
+          content: `Self-awareness mode activated.\nLoaded: ${loadedDocs.join(', ')}\nRoot: ${synapticRoot}\n\nYou can now ask me to modify my own code.`,
         });
         break;
       }

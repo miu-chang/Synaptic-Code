@@ -589,4 +589,23 @@ Write a comprehensive summary in a structured format. Be concise but preserve al
       .filter((c): c is NonNullable<typeof c> => c !== null)
       .sort((a, b) => a.updatedAt - b.updatedAt); // Oldest first (like terminal history)
   }
+
+  /**
+   * Get the most recent conversation ID
+   */
+  getMostRecentId(): string | null {
+    const conversations = this.list();
+    if (conversations.length === 0) return null;
+    // list() is sorted oldest first, so last item is most recent
+    return conversations[conversations.length - 1].id;
+  }
+
+  /**
+   * Load the most recent conversation
+   */
+  loadMostRecent(): Conversation | null {
+    const id = this.getMostRecentId();
+    if (!id) return null;
+    return this.load(id);
+  }
 }

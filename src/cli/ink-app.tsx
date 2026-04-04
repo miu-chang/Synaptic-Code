@@ -14,6 +14,8 @@ export interface InkAppConfig {
   isGitRepo?: boolean;
   synapticStatus?: string;
   initialMessages?: Array<{ type: 'info' | 'error'; content: string }>;
+  continueSession?: boolean;  // Continue most recent conversation
+  resumeSessionId?: string;   // Resume specific conversation by ID
 }
 
 // Synchronized Output sequences (DEC Mode 2026)
@@ -75,6 +77,8 @@ export async function startInkApp(config: InkAppConfig): Promise<void> {
       isGitRepo={config.isGitRepo}
       synapticStatus={config.synapticStatus}
       initialMessages={config.initialMessages}
+      continueSession={config.continueSession}
+      resumeSessionId={config.resumeSessionId}
     />,
     {
       exitOnCtrlC: false, // Handle Ctrl+C manually (double-press to exit)

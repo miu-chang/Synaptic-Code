@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { t } from '../../i18n/index.js';
+import { loadCustomCommands } from '../../core/custom-commands.js';
 
 interface Command {
   name: string;
@@ -26,6 +27,7 @@ const COMMAND_DEFINITIONS: Command[] = [
   { name: 'self', descriptionKey: 'self' },
   { name: 'timeline', descriptionKey: 'timeline' },
   { name: 'diff', descriptionKey: 'diff' },
+  { name: 'changelog', descriptionKey: 'changelog' },
   { name: 'quit', descriptionKey: 'quit', shortcut: 'q' },
 ];
 
@@ -60,8 +62,19 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps): Reac
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [filter, setFilter] = useState('');
 
+  // Load custom commands from synaptic/ directory
+  const customCommands = useMemo(() => {
+    return loadCustomCommands().map(cmd => ({
+      name: cmd.name,
+      description: `[custom] ${cmd.content.slice(0, 50)}${cmd.content.length > 50 ? '...' : ''}`,
+      shortcut: undefined,
+      isCustom: true,
+    }));
+  }, []);
+
   const commands = getCommands();
-  const filteredCommands = commands.filter(cmd =>
+  const allCommands = [...commands, ...customCommands];
+  const filteredCommands = allCommands.filter(cmd =>
     cmd.name.includes(filter.toLowerCase()) ||
     cmd.description.toLowerCase().includes(filter.toLowerCase())
   );
@@ -121,20 +134,24 @@ export function CommandPalette({ onSelect, onClose }: CommandPaletteProps): Reac
         </Box>
       )}
 
-      {filteredCommands.map((cmd, i) => (
-        <Box key={cmd.name}>
-          <Text color={i === selectedIndex ? 'cyan' : undefined}>
-            {i === selectedIndex ? '❯ ' : '  '}
-          </Text>
-          <Text bold={i === selectedIndex} color={i === selectedIndex ? 'cyan' : undefined}>
-            /{cmd.name}
-          </Text>
-          <Text dimColor> - {cmd.description}</Text>
-          {cmd.shortcut && (
-            <Text color="gray"> [{cmd.shortcut}]</Text>
-          )}
-        </Box>
-      ))}
+      {filteredCommands.map((cmd, i) => {
+        const isCustom = 'isCustom' in cmd && cmd.isCustom;
+        return (
+          <Box key={cmd.name}>
+            <Text color={i === selectedIndex ? 'cyan' : undefined}>
+              {i === selectedIndex ? '❯ ' : '  '}
+            </Text>
+            <Text bold={i === selectedIndex} color={i === selectedIndex ? 'cyan' : (isCustom ? 'magenta' : undefined)}>
+              /{cmd.name}
+            </Text>
+            {isCustom ? <Text color="magenta"> [custom]</Text> : null}
+            <Text dimColor> - {cmd.description.replace('[custom] ', '')}</Text>
+            {cmd.shortcut ? (
+              <Text color="gray"> [{cmd.shortcut}]</Text>
+            ) : null}
+          </Box>
+        );
+      })}
 
       {filteredCommands.length === 0 && (
         <Text dimColor>No commands found</Text>

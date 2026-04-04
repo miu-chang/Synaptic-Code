@@ -135,13 +135,44 @@ export const blenderListToolsTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'blender_list_tools',
-      description: 'List available Blender tools. Use category parameter to filter, or leave empty to see all categories.',
+      description: `List available Blender tools by category. Main categories:
+- Object: Create/delete/transform objects
+- Mesh: Edit vertices, edges, faces
+- MeshCleanup/MeshAnalysis: Clean geometry, analyze topology
+- Transform: Move, rotate, scale
+- Modifiers: Subdivision, mirror, etc.
+- Materials: PBR materials setup
+- Texture/TextureMat: Texture operations
+- UV: UV mapping, unwrap
+- Armature: Bones, rigging
+- WeightPainting/WeightFeedback: Vertex weights
+- Animation/AnimationExt/AnimationFeedback: Keyframes, NLA
+- ShapeKeys: Blend shapes
+- Camera: Camera setup
+- Lighting: Lights, HDRI
+- Rendering: Render settings
+- Scene: Scene management
+- Batch: Batch operations
+- ImportExport: FBX, OBJ, GLTF
+- VRMExport: VRM export
+- AvatarEdit/BodyMod: Avatar editing
+- ClothingFitting: Clothing transfer
+- AccessoryHair: Hair accessories
+- Baking/AuxiliaryMaps: Texture baking
+- GameDev: Game development tools
+- Procedural: Procedural generation
+- RiggingFeedback: Rigging analysis
+- SmartOperations: Smart auto tools
+- StateDiff/Inspection: State comparison
+- VisualFeedback/CustomView: Visual helpers
+- WorkflowGuide/RegionFocus: Workflow assistance
+Use category parameter for full tool schemas.`,
       parameters: {
         type: 'object',
         properties: {
           category: {
             type: 'string',
-            description: 'Optional: filter by category name',
+            description: 'Category name (e.g., "Mesh", "Materials", "Animation"). Use exact category name.',
           },
         },
       },
@@ -155,11 +186,40 @@ export const blenderListToolsTool: ToolHandler = {
     }
 
     if (category) {
+      // Handle "all" category - fetch from all categories
+      if (category.toLowerCase() === 'all') {
+        const categories = await client.getCategories('blender');
+        const allTools: Array<{ name: string; description: string; category: string }> = [];
+        for (const cat of categories) {
+          const tools = await client.getToolsByCategory('blender', cat.name);
+          for (const t of tools) {
+            allTools.push({ name: t.name, description: t.description, category: cat.name });
+          }
+        }
+        return JSON.stringify({ category: 'all', tools: allTools, count: allTools.length });
+      }
+
       const tools = await client.getToolsByCategory('blender', category);
-      return JSON.stringify({ category, tools, count: tools.length });
+      // Include full tool info with inputSchema for LLM to understand parameters
+      const toolsWithSchema = tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema?.properties
+          ? Object.entries(t.inputSchema.properties).map(([k, v]) => ({
+              name: k,
+              ...(v as Record<string, unknown>),
+              required: t.inputSchema?.required?.includes(k) ?? false,
+            }))
+          : [],
+      }));
+      return JSON.stringify({ category, tools: toolsWithSchema, count: tools.length });
     } else {
       const categories = await client.getCategories('blender');
-      return JSON.stringify({ categories, total: categories.length });
+      return JSON.stringify({
+        categories,
+        total: categories.length,
+        hint: 'Call blender_list_tools with a category name to see tools and their parameters',
+      });
     }
   },
 };
@@ -172,13 +232,38 @@ export const unityListToolsTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'unity_list_tools',
-      description: 'List available Unity tools. Use category parameter to filter, or leave empty to see all categories.',
+      description: `List available Unity tools by category. Main categories:
+- GameObject: Create/delete GameObjects, prefabs, components
+- Transform: Position, rotation, scale
+- Scene: Scene management, hierarchy
+- Camera/Cinemachine: Cameras, virtual cameras, dolly
+- Animation/Timeline: Animator, clips, timeline
+- Physics: Rigidbody, colliders, raycasts
+- Material/Shader: Materials, shaders
+- Lighting: Lights, shadows, GI
+- Audio: AudioSource, mixer
+- UI: Canvas, buttons, text
+- VFX: Particle systems, effects
+- AI/GOAP/GameSystems: AI behaviors, GOAP
+- Scripting: C# scripts
+- Build: Build settings
+- Debug/Monitoring: Console logs, performance
+- AssetManagement: Asset operations
+- Input: Input system setup
+- Optimization: Performance tools
+- Screenshot: Capture screenshots
+- Weather/TimeOfDay: Weather, day-night
+- Editor: Editor utilities
+- Package: Package manager
+- Batch: Batch operations
+- Utility/Other: Misc utilities
+Use category parameter for full tool schemas.`,
       parameters: {
         type: 'object',
         properties: {
           category: {
             type: 'string',
-            description: 'Optional: filter by category name',
+            description: 'Category name (e.g., "GameObject", "Animation", "VFX"). Use exact category name.',
           },
         },
       },
@@ -192,11 +277,40 @@ export const unityListToolsTool: ToolHandler = {
     }
 
     if (category) {
+      // Handle "all" category - fetch from all categories
+      if (category.toLowerCase() === 'all') {
+        const categories = await client.getCategories('unity');
+        const allTools: Array<{ name: string; description: string; category: string }> = [];
+        for (const cat of categories) {
+          const tools = await client.getToolsByCategory('unity', cat.name);
+          for (const t of tools) {
+            allTools.push({ name: t.name, description: t.description, category: cat.name });
+          }
+        }
+        return JSON.stringify({ category: 'all', tools: allTools, count: allTools.length });
+      }
+
       const tools = await client.getToolsByCategory('unity', category);
-      return JSON.stringify({ category, tools, count: tools.length });
+      // Include full tool info with inputSchema for LLM to understand parameters
+      const toolsWithSchema = tools.map(t => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.inputSchema?.properties
+          ? Object.entries(t.inputSchema.properties).map(([k, v]) => ({
+              name: k,
+              ...(v as Record<string, unknown>),
+              required: t.inputSchema?.required?.includes(k) ?? false,
+            }))
+          : [],
+      }));
+      return JSON.stringify({ category, tools: toolsWithSchema, count: tools.length });
     } else {
       const categories = await client.getCategories('unity');
-      return JSON.stringify({ categories, total: categories.length });
+      return JSON.stringify({
+        categories,
+        total: categories.length,
+        hint: 'Call unity_list_tools with a category name to see tools and their parameters',
+      });
     }
   },
 };

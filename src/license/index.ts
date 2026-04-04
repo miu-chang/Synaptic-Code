@@ -5,9 +5,11 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { homedir, hostname, platform, arch } from 'os';
 import { createHash } from 'crypto';
+import { fileURLToPath } from 'url';
+import { EMBEDDED_HASHES } from './hashes.js';
 
 // API endpoint
 const API_BASE = 'https://kawaii-agent-backend.vercel.app/api/synaptic';
@@ -16,14 +18,17 @@ const API_BASE = 'https://kawaii-agent-backend.vercel.app/api/synaptic';
 const LICENSE_DIR = join(homedir(), '.synaptic-code');
 const LICENSE_FILE = join(LICENSE_DIR, 'license.json');
 
-// Cache validity (7 days)
+// Cache validity for online verification (7 days)
 const CACHE_VALIDITY_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Offline grace period - after this, restricted mode
+const OFFLINE_GRACE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days offline allowed
 
 // Trial duration in days
 const TRIAL_DAYS = 7;
 
 // License types
-export type LicenseStatus = 'valid' | 'trial' | 'expired' | 'invalid' | 'none' | 'offline';
+export type LicenseStatus = 'valid' | 'trial' | 'expired' | 'invalid' | 'none' | 'offline' | 'restricted';
 
 export interface LicenseInfo {
   status: LicenseStatus;
@@ -61,6 +66,98 @@ interface TrialInfo {
 function getMachineHash(): string {
   const data = `${hostname()}-${platform()}-${arch()}-synaptic`;
   return createHash('sha256').update(data).digest('hex').slice(0, 32);
+}
+
+/**
+ * Get hash of a file for integrity verification
+ */
+function getFileHash(relativePath: string): string | null {
+  try {
+    const __filename = fileURLToPath(import.meta.url);
+    const srcRoot = join(dirname(__filename), '..');
+
+    // Try both .ts (dev) and .js (compiled)
+    const tsPath = join(srcRoot, relativePath);
+    const jsPath = join(srcRoot, relativePath.replace('.ts', '.js'));
+
+    for (const path of [tsPath, jsPath]) {
+      if (existsSync(path)) {
+        const content = readFileSync(path, 'utf-8');
+        return createHash('sha256').update(content).digest('hex');
+      }
+    }
+    return null;  // File not found
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get hashes of critical files for integrity verification
+ * Uses file hashes for dev/npm, embedded hashes for binary builds
+ */
+function getIntegrityHashes(): Record<string, string> {
+  const licenseHash = getFileHash('license/index.ts');
+  const registryHash = getFileHash('tools/registry.ts');
+
+  // If files exist, use computed hashes (dev/npm mode)
+  if (licenseHash && registryHash) {
+    return {
+      license: licenseHash,
+      registry: registryHash,
+    };
+  }
+
+  // Files not found - use embedded hashes (binary mode)
+  // Check if embedded hashes are valid (not placeholder)
+  if (EMBEDDED_HASHES.license.startsWith('__')) {
+    // Placeholder not replaced - build error
+    console.error('Warning: Embedded hashes not set. Build may be incomplete.');
+    return {
+      license: 'build_error',
+      registry: 'build_error',
+    };
+  }
+
+  return EMBEDDED_HASHES;
+}
+
+/**
+ * Verify code integrity with server
+ * Returns true if integrity check passes, false if tampering detected
+ */
+export async function verifyCodeIntegrity(): Promise<{ valid: boolean; tamperedFiles?: string[] }> {
+  try {
+    const response = await fetch(`${API_BASE}/integrity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        integrityHashes: getIntegrityHashes(),
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+
+    const data = await response.json() as {
+      valid?: boolean;
+      tamperedFiles?: string[];
+      error?: string;
+      recovery?: { message: string; downloadUrl: string };
+    };
+
+    if (data.error === 'integrity_check_failed' || !data.valid) {
+      console.error('\n⚠️  CODE TAMPERING DETECTED ⚠️');
+      if (data.recovery) {
+        console.error(data.recovery.message);
+        console.error(`Download: ${data.recovery.downloadUrl}`);
+      }
+      return { valid: false, tamperedFiles: data.tamperedFiles };
+    }
+
+    return { valid: true };
+  } catch {
+    // Network error - allow (can't verify offline)
+    return { valid: true };
+  }
 }
 
 /**
@@ -188,6 +285,7 @@ async function verifyTrialOnline(): Promise<{
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         machineHash: getMachineHash(),
+        integrityHashes: getIntegrityHashes(),
       }),
       signal: AbortSignal.timeout(5000),
     });
@@ -198,7 +296,18 @@ async function verifyTrialOnline(): Promise<{
       daysLeft?: number;
       startedAt?: string;
       error?: string;
+      recovery?: { message: string; downloadUrl: string };
     };
+
+    // Handle integrity check failure
+    if (data.error === 'integrity_check_failed') {
+      console.error('\n⚠️  CODE TAMPERING DETECTED ⚠️');
+      if (data.recovery) {
+        console.error(data.recovery.message);
+        console.error(`Download: ${data.recovery.downloadUrl}`);
+      }
+      return { valid: false, daysLeft: 0, started: 0, error: 'integrity_check_failed' };
+    }
 
     if (!data.exists) {
       return null;  // No trial registered for this machine
@@ -229,6 +338,7 @@ async function registerTrialOnline(): Promise<{
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         machineHash: getMachineHash(),
+        integrityHashes: getIntegrityHashes(),
       }),
       signal: AbortSignal.timeout(5000),
     });
@@ -360,6 +470,11 @@ export async function verifyTrial(): Promise<LicenseInfo> {
   const online = await verifyTrialOnline();
 
   if (online) {
+    // Handle integrity check failure
+    if (online.error === 'integrity_check_failed') {
+      return { status: 'invalid' };
+    }
+
     // Server responded - use server truth
     if (online.valid) {
       // Update local cache
@@ -399,6 +514,7 @@ async function verifyOnline(licenseKey: string): Promise<{
   plan?: string;
   expiresAt?: number | null;
   error?: string;
+  recovery?: { message: string; downloadUrl: string };
 }> {
   try {
     const response = await fetch(`${API_BASE}/verify`, {
@@ -407,10 +523,25 @@ async function verifyOnline(licenseKey: string): Promise<{
       body: JSON.stringify({
         licenseKey: licenseKey.toUpperCase(),
         machineHash: getMachineHash(),
+        integrityHashes: getIntegrityHashes(),  // Send multiple file hashes for integrity check
       }),
     });
 
-    const data = await response.json() as { valid?: boolean; plan?: string; expiresAt?: string; error?: string };
+    const data = await response.json() as {
+      valid?: boolean;
+      plan?: string;
+      expiresAt?: string;
+      error?: string;
+      recovery?: { message: string; downloadUrl: string };
+    };
+
+    // Handle integrity check failure
+    if (data.error === 'integrity_check_failed' && data.recovery) {
+      console.error('\n⚠️  LICENSE CODE TAMPERING DETECTED ⚠️');
+      console.error(data.recovery.message);
+      console.error(`Download: ${data.recovery.downloadUrl}`);
+      return { valid: false, error: 'integrity_check_failed', recovery: data.recovery };
+    }
 
     if (data.valid) {
       return {
@@ -533,6 +664,10 @@ export function deactivateLicense(): void {
 
 /**
  * Get current license status (with online verification)
+ * NEW BEHAVIOR:
+ * - Online: Always verify (detect tampering immediately)
+ * - Offline within 3 days: Allow with 'offline' status
+ * - Offline over 3 days: 'restricted' status (limited features)
  */
 export async function getLicenseStatusAsync(): Promise<LicenseInfo> {
   const stored = loadStoredLicense();
@@ -550,30 +685,36 @@ export async function getLicenseStatusAsync(): Promise<LicenseInfo> {
       };
     }
 
-    // If cache is fresh, return cached status
-    if (cacheAge < CACHE_VALIDITY_MS) {
-      return {
-        status: 'valid',
-        key: stored.key,
-        email: stored.email,
-        plan: stored.plan,
-        activatedAt: stored.activatedAt,
-        expiresAt: stored.expiresAt,
-        lastVerified: stored.lastVerified,
-      };
-    }
-
-    // Cache is stale, verify online
+    // ALWAYS try to verify online (for tampering detection)
     const result = await verifyOnline(stored.key);
 
     if (result.error === 'network_error') {
-      // Offline but cache exists - allow with warning
+      // Offline - check grace period
+      if (cacheAge > OFFLINE_GRACE_MS) {
+        // Over 3 days offline - restricted mode
+        return {
+          status: 'restricted',
+          key: stored.key,
+          plan: stored.plan,
+          lastVerified: stored.lastVerified,
+          offline: true,
+        };
+      }
+      // Within grace period - allow with warning
       return {
         status: 'offline',
         key: stored.key,
         plan: stored.plan,
         lastVerified: stored.lastVerified,
         offline: true,
+      };
+    }
+
+    // Handle integrity check failure
+    if (result.error === 'integrity_check_failed') {
+      return {
+        status: 'invalid',
+        key: stored.key,
       };
     }
 
@@ -684,7 +825,7 @@ export function getLicenseStatus(): LicenseInfo {
  */
 export function hasValidAccess(): boolean {
   const status = getLicenseStatus();
-  return status.status === 'valid' || status.status === 'trial' || status.status === 'offline';
+  return status.status === 'valid' || status.status === 'trial' || status.status === 'offline' || status.status === 'restricted';
 }
 
 /**
@@ -692,7 +833,23 @@ export function hasValidAccess(): boolean {
  */
 export async function hasValidAccessAsync(): Promise<boolean> {
   const status = await getLicenseStatusAsync();
+  return status.status === 'valid' || status.status === 'trial' || status.status === 'offline' || status.status === 'restricted';
+}
+
+/**
+ * Check if user has full access (not restricted)
+ */
+export function hasFullAccess(): boolean {
+  const status = getLicenseStatus();
   return status.status === 'valid' || status.status === 'trial' || status.status === 'offline';
+}
+
+/**
+ * Check if user is in restricted mode (limited features)
+ */
+export function isRestrictedMode(): boolean {
+  const status = getLicenseStatus();
+  return status.status === 'restricted';
 }
 
 /**

@@ -193,14 +193,91 @@ The LLM runs on the server, clients just send text.
 
 ---
 
-## Self-Modification
+## Custom Slash Commands
 
-You are running the code in the Synaptic Code installation directory (determined dynamically at runtime).
-Key files:
-- `src/index.ts` - CLI entry point
-- `src/cli/components/App.tsx` - Main UI
-- `src/tools/*.ts` - Tool implementations
-- `src/llm/client.ts` - LLM API clients
-- `src/core/agent.ts` - Agent mode logic
+Users can create custom slash commands by adding `.md` files to the `synaptic/` directory in their project.
 
-You can modify these files to enhance your own capabilities.
+### Creating a Custom Command
+
+1. Create a file: `synaptic/<command-name>.md`
+2. Write the prompt template inside
+
+Example - `synaptic/review.md`:
+```markdown
+Review the following code for:
+- Bugs and potential issues
+- Performance problems
+- Code style and best practices
+
+$ARGUMENTS
+```
+
+### Available Variables
+
+| Variable | Description |
+|----------|-------------|
+| `$ARGUMENTS` | Text after the command (e.g., `/review file.ts` → `file.ts`) |
+| `$CWD` | Current working directory |
+| `$DATE` | Current date (YYYY-MM-DD) |
+
+### Example Commands
+
+**`synaptic/explain.md`** - Explain code:
+```markdown
+Explain this code in detail:
+$ARGUMENTS
+```
+
+**`synaptic/test.md`** - Generate tests:
+```markdown
+Generate comprehensive tests for:
+$ARGUMENTS
+
+Use the project's existing test framework.
+```
+
+**`synaptic/fix.md`** - Fix an issue:
+```markdown
+Fix the following issue:
+$ARGUMENTS
+
+Read the relevant code first, then make minimal targeted changes.
+```
+
+---
+
+## Project Configuration (SYNAPTIC.md)
+
+Each project can have a `SYNAPTIC.md` file that is automatically loaded into the system prompt.
+
+### Location (checked in order)
+1. `synaptic/SYNAPTIC.md`
+2. `SYNAPTIC.md` (project root)
+3. `.synaptic/SYNAPTIC.md`
+
+### Purpose
+- Project-specific guidelines
+- Coding conventions
+- Architecture decisions
+- Important context for the LLM
+
+### Example SYNAPTIC.md
+```markdown
+# Project Guidelines
+
+## Tech Stack
+- TypeScript with strict mode
+- React 18 with hooks
+- Tailwind CSS
+
+## Conventions
+- Use functional components
+- Prefer named exports
+- Tests in `__tests__/` directories
+
+## Important
+- Never modify files in `generated/`
+- Always run `npm test` after changes
+```
+
+This content is automatically included in every conversation.

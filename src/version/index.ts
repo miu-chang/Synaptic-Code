@@ -3,8 +3,8 @@
  * Checks for updates against the server
  */
 
-// Import version from package.json at build time
-const CURRENT_VERSION = '0.1.0';
+// Hardcoded version for binary builds
+const CURRENT_VERSION = '0.1.3';
 
 const API_BASE = 'https://kawaii-agent-backend.vercel.app/api/synaptic';
 

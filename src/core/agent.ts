@@ -23,6 +23,7 @@ export interface AgentConfig {
   stopOnError: boolean;
   verbose: boolean;
   isSubAgent: boolean;
+  appendSystemPrompt?: string;
 }
 
 export interface AgentState {
@@ -171,10 +172,15 @@ export class Agent {
     const toolList = this.tools.list();
 
     // Initialize conversation
-    const systemPrompt = getAgentSystemPrompt(goal, process.cwd(), toolList, {
+    let systemPrompt = getAgentSystemPrompt(goal, process.cwd(), toolList, {
       maxIterations: this.config.maxIterations,
       isSubAgent: this.config.isSubAgent,
     });
+
+    // Append additional system prompt if provided
+    if (this.config.appendSystemPrompt) {
+      systemPrompt = `${systemPrompt}\n\n${this.config.appendSystemPrompt}`;
+    }
 
     this.messages = [
       { role: 'system', content: systemPrompt },

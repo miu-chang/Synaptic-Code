@@ -3,7 +3,30 @@
  * Extracts plan from LLM response before executing tools
  */
 
+import { resolve, relative } from 'path';
 import type { ToolCall } from '../llm/types.js';
+
+// Project root is set on startup
+let projectRoot = process.cwd();
+
+export function setProjectRoot(root: string): void {
+  projectRoot = resolve(root);
+}
+
+export function getProjectRoot(): string {
+  return projectRoot;
+}
+
+/**
+ * Check if a path is outside the project root
+ */
+export function isOutsideProject(targetPath: string): boolean {
+  if (!targetPath) return false;
+  const resolved = resolve(targetPath);
+  const rel = relative(projectRoot, resolved);
+  // If relative path starts with ".." it's outside
+  return rel.startsWith('..');
+}
 
 export interface PlanStep {
   id: number;
@@ -11,11 +34,32 @@ export interface PlanStep {
   tool?: string;
   toolArgs?: string;
   status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed';
+  outsideProject?: boolean;  // Warning flag for outside-project access
 }
 
 export interface ExecutionPlan {
   steps: PlanStep[];
   reasoning?: string;
+}
+
+/**
+ * Extract target path from tool arguments
+ */
+function extractTargetPath(toolName: string, argsJson: string): string | null {
+  try {
+    const args = JSON.parse(argsJson);
+    // File operations
+    if (['read_file', 'write_file', 'edit_file', 'create_file', 'delete_file'].includes(toolName)) {
+      return args.path || null;
+    }
+    // Bash/shell - check cwd
+    if (['bash', 'run_shell', 'bash_background'].includes(toolName)) {
+      return args.cwd || null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -27,12 +71,17 @@ export function extractPlanFromToolCalls(toolCalls: ToolCall[]): ExecutionPlan {
     const toolName = tc.function.name;
     let action = formatToolAction(toolName, tc.function.arguments);
 
+    // Check if target is outside project
+    const targetPath = extractTargetPath(toolName, tc.function.arguments);
+    const outsideProject = targetPath ? isOutsideProject(targetPath) : false;
+
     return {
       id: index + 1,
       action,
       tool: toolName,
       toolArgs: tc.function.arguments,
       status: 'pending' as const,
+      outsideProject,
     };
   });
 
@@ -121,6 +170,8 @@ export function shouldRequireApproval(toolCalls: ToolCall[]): boolean {
     'create_file',
     'delete_file',
     'run_shell',
+    'bash',
+    'bash_background',
     'spawn_agent',
   ];
 
