@@ -18,6 +18,7 @@ interface StatusBarProps {
   lastUsage?: { prompt: number; completion: number } | null;
   autoAccept?: boolean;
   isLoading?: boolean;
+  reasoningEffort?: string | null;
 }
 
 function formatTokens(n: number): string {
@@ -71,6 +72,7 @@ export function StatusBar({
   lastUsage = null,
   autoAccept = true,
   isLoading = false,
+  reasoningEffort = null,
 }: StatusBarProps): React.ReactElement {
   const usage = maxTokens > 0 ? (tokenCount / maxTokens) * 100 : 0;
   const [time, setTime] = useState(formatTime());
@@ -96,6 +98,9 @@ export function StatusBar({
           <Text dimColor> │ ↑{formatTokens(lastUsage.prompt)} ↓{formatTokens(lastUsage.completion)}</Text>
         )}
         <Text dimColor> │ {toolCount} tools</Text>
+        {reasoningEffort && (
+          <Text dimColor> │ 🧠 {reasoningEffort}</Text>
+        )}
         <Text dimColor> │ </Text>
         <Text dimColor>{autoAccept ? t().status.autoAccept : t().status.confirmMode}</Text>
       </Box>

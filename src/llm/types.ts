@@ -70,6 +70,8 @@ export interface ToolDefinition {
   };
 }
 
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+
 export interface ChatCompletionRequest {
   model: string;
   messages: Message[];
@@ -78,6 +80,12 @@ export interface ChatCompletionRequest {
   stream?: boolean;
   max_tokens?: number;
   temperature?: number;
+  /**
+   * Reasoning effort for reasoning-capable models (e.g. gpt-5.x, grok-4-1-fast-reasoning).
+   * When set, the OpenAI-compatible client will attempt the /responses streaming endpoint
+   * first and fall back to /chat/completions on failure.
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface ChatCompletionResponse {

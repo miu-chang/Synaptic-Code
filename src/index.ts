@@ -38,7 +38,7 @@ const program = new Command();
 program
   .name('synaptic')
   .description('Synaptic Code - Local LLM-powered coding assistant')
-  .version('0.1.2')
+  .version('0.2.19')
   .option('-p, --prompt <prompt>', 'Run in non-interactive mode with the given prompt')
   .option('-c, --continue', 'Continue the most recent conversation')
   .option('-r, --resume [id]', 'Resume a specific conversation (shows list if no id)')
@@ -383,28 +383,144 @@ program
     // Pre-load model for lmstudio provider (before Ink to avoid re-render)
     const initialMessages: Array<{ type: 'info' | 'error'; content: string }> = [];
     if (settings.provider === 'lmstudio') {
-      const lms = await import('./lms/client.js');
-      const loadedModels = lms.listLoadedModels();
-      if (loadedModels.length === 0) {
-        const defaultModel = settings.providers.lmstudio.model;
-        if (defaultModel) {
-          const contextLength = Math.round(settings.maxContextTokens * 1.1);
+      // Notify if LM Studio is running on a non-default port
+      const detectedPort = lms.getDetectedPort();
+      if (detectedPort && detectedPort !== 1234) {
+        initialMessages.push({ type: 'info', content: `LM Studio detected on port ${detectedPort}` });
+      }
 
-          // Spinner animation during model load
+      // First try the lms CLI; fall back to /v1/models REST endpoint
+      let loadedModels: string[] = [];
+      try {
+        loadedModels = lms.listLoadedModels();
+      } catch {}
+      if (loadedModels.length === 0) {
+        try {
+          const apiUrl = settings.providers.lmstudio.baseUrl.replace('/v1', '');
+          const res = await fetch(`${apiUrl}/v1/models`, { signal: AbortSignal.timeout(3000) });
+          if (res.ok) {
+            const data = await res.json() as { data?: Array<{ id: string }> };
+            if (data.data && data.data.length > 0) {
+              loadedModels = data.data.map((m) => m.id);
+            }
+          }
+        } catch {}
+      }
+
+      if (loadedModels.length > 0) {
+        // A model is already loaded — sync settings and ensure context length is sufficient
+        const loadedModel = loadedModels[0];
+        const configuredModel = settings.providers.lmstudio.model;
+        if (
+          configuredModel !== loadedModel &&
+          !loadedModel.includes(configuredModel) &&
+          !configuredModel.includes(loadedModel)
+        ) {
+          settings.providers.lmstudio.model = loadedModel;
+        }
+
+        const requiredContext = Math.round(settings.maxContextTokens * 1.1);
+        if (lms.isLmsInstalled()) {
+          const loadedInfo = lms.getLoadedModelsInfo();
+          const currentCtx = loadedInfo.length > 0 ? loadedInfo[0].context : 0;
+          if (currentCtx === 0 || currentCtx < requiredContext) {
+            const { getRecommendedGpuOffload, detectSystemSpecs } = await import('./config/settings.js');
+            const sysSpecs = detectSystemSpecs();
+            const gpuOff = getRecommendedGpuOffload(sysSpecs, loadedModel);
+
+            const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let spinnerIndex = 0;
+            const spinnerInterval = setInterval(() => {
+              process.stdout.write(`\r${chalk.cyan(spinnerFrames[spinnerIndex])} ${chalk.dim(`Reloading ${loadedModel} with context ${requiredContext}...`)}`);
+              spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+            }, 80);
+
+            const reloadResult = await lms.loadModel(loadedModel, { contextLength: requiredContext, gpu: gpuOff });
+
+            clearInterval(spinnerInterval);
+            process.stdout.write('\r' + ' '.repeat(80) + '\r');
+
+            if (reloadResult.success) {
+              initialMessages.push({ type: 'info', content: `Model: ${loadedModel} (ctx: ${requiredContext})` });
+            } else {
+              initialMessages.push({ type: 'info', content: `Using loaded model: ${loadedModel} (ctx: ${currentCtx})` });
+            }
+          } else {
+            initialMessages.push({ type: 'info', content: `Using loaded model: ${loadedModel} (ctx: ${currentCtx || 'unknown'})` });
+          }
+        } else {
+          initialMessages.push({ type: 'info', content: `Using loaded model: ${loadedModel}` });
+        }
+      } else {
+        // No model loaded — figure out which one to load
+        let modelToLoad: string | null = settings.providers.lmstudio.model;
+        if (lms.isLmsInstalled()) {
+          const installedModels = lms.listModels();
+          const isInstalled = modelToLoad
+            ? installedModels.some((m) => m.name.includes(modelToLoad!) || modelToLoad!.includes(m.name))
+            : false;
+          if (!isInstalled) {
+            // Priority list of preferred fallback models
+            const modelPriority = [
+              'qwen3.6-35b', 'gemma-4-26b', 'qwen3.5-35b',
+              'qwen3.5-14b', 'qwen3.5-9b', 'qwen3.5-4b',
+              'gemma', 'qwen', 'nemotron',
+            ];
+            let fallbackModel: string | null = null;
+            for (const priority of modelPriority) {
+              const match = installedModels.find((m) => m.name.toLowerCase().includes(priority));
+              if (match) {
+                fallbackModel = match.name;
+                break;
+              }
+            }
+            if (fallbackModel) {
+              initialMessages.push({ type: 'info', content: `Configured model '${modelToLoad}' not installed, using '${fallbackModel}'` });
+              modelToLoad = fallbackModel;
+            } else if (installedModels.length > 0) {
+              modelToLoad = installedModels[0].name;
+              initialMessages.push({ type: 'info', content: `Configured model not found, using '${modelToLoad}'` });
+            } else {
+              console.log(chalk.yellow('\n  No models installed.'));
+              console.log(chalk.dim('  Starting setup wizard...\n'));
+              await runSetupWizard();
+              const newLoaded = lms.listLoadedModels();
+              if (newLoaded.length > 0) {
+                modelToLoad = null;
+              } else {
+                const newInstalled = lms.listModels();
+                modelToLoad = newInstalled.length > 0 ? newInstalled[0].name : null;
+              }
+            }
+          }
+        } else {
+          console.log(chalk.yellow('\n  LM Studio CLI not found.'));
+          console.log(chalk.dim('  Starting setup wizard...\n'));
+          await runSetupWizard();
+          const newLoaded = lms.listLoadedModels();
+          modelToLoad = newLoaded.length > 0 ? null : null;
+        }
+
+        if (modelToLoad) {
+          const contextLength = Math.round(settings.maxContextTokens * 1.1);
+          const { getRecommendedGpuOffload, detectSystemSpecs } = await import('./config/settings.js');
+          const specs = detectSystemSpecs();
+          const gpuOffload = getRecommendedGpuOffload(specs, modelToLoad);
+
           const spinnerFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
           let spinnerIndex = 0;
           const spinnerInterval = setInterval(() => {
-            process.stdout.write(`\r${chalk.cyan(spinnerFrames[spinnerIndex])} ${chalk.dim(`Loading model: ${defaultModel}...`)}`);
+            process.stdout.write(`\r${chalk.cyan(spinnerFrames[spinnerIndex])} ${chalk.dim(`Loading model: ${modelToLoad}...`)}`);
             spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
           }, 80);
 
-          const result = await lms.loadModel(defaultModel, { contextLength });
+          const result = await lms.loadModel(modelToLoad, { contextLength, gpu: gpuOffload });
 
           clearInterval(spinnerInterval);
-          process.stdout.write('\r' + ' '.repeat(60) + '\r'); // Clear spinner line
+          process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
           if (result.success) {
-            initialMessages.push({ type: 'info', content: `Model loaded: ${defaultModel} (ctx: ${contextLength})` });
+            initialMessages.push({ type: 'info', content: `Model loaded: ${modelToLoad} (ctx: ${contextLength})` });
           } else {
             initialMessages.push({ type: 'error', content: `Failed to load model: ${result.message}` });
           }
@@ -412,14 +528,44 @@ program
       }
     }
 
-    // Check for updates (non-blocking)
+    // Check for updates and offer interactive install
     const { checkForUpdates } = await import('./version/index.js');
     const versionInfo = await checkForUpdates();
     if (versionInfo?.updateAvailable) {
-      initialMessages.push({
-        type: 'info',
-        content: `Update available: v${versionInfo.latestVersion} (current: v${versionInfo.currentVersion})${versionInfo.downloadUrl ? ` - ${versionInfo.downloadUrl}` : ''}`
+      console.log(chalk.cyan(`\n  Update available: v${versionInfo.currentVersion} → v${versionInfo.latestVersion}`));
+      process.stdout.write(chalk.cyan('  Update now? (y/n): '));
+      const key = await new Promise<string>((resolve) => {
+        process.stdin.setRawMode?.(true);
+        process.stdin.resume();
+        process.stdin.once('data', (data) => {
+          process.stdin.setRawMode?.(false);
+          process.stdin.pause();
+          const ch = data.toString().toLowerCase();
+          process.stdout.write(ch + '\n');
+          resolve(ch);
+        });
       });
+      if (key === 'y') {
+        const { performUpdate } = await import('./version/updater.js');
+        const result = await performUpdate((msg) => {
+          process.stdout.write(`\r  ${chalk.dim(msg)}${' '.repeat(20)}`);
+        });
+        console.log();
+        if (result.success) {
+          console.log(chalk.green(`  ${result.message}`));
+          if (result.restartRequired) {
+            console.log(chalk.dim('  Please restart Synaptic Code.\n'));
+            process.exit(0);
+          }
+        } else {
+          console.log(chalk.yellow(`  ${result.message}`));
+        }
+      } else {
+        initialMessages.push({
+          type: 'info',
+          content: `Update available: v${versionInfo.latestVersion} (run /update to install)`,
+        });
+      }
     }
 
     const { baseUrlOrApiKey, model } = getClientArgs(settings);
@@ -765,6 +911,9 @@ program
 
         // Copy executable
         console.log(chalk.dim(`  Copying to ${installDir}...`));
+        // Remove existing files first (avoid ETXTBSY / locked-file errors)
+        try { if (existsSync(synapticPath)) unlinkSync(synapticPath); } catch {}
+        try { if (existsSync(synPath)) unlinkSync(synPath); } catch {}
         copyFileSync(execPath, synapticPath);
         copyFileSync(execPath, synPath);
 

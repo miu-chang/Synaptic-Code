@@ -3,8 +3,7 @@
  * Checks for updates against the server
  */
 
-// Hardcoded version for binary builds
-const CURRENT_VERSION = '0.1.3';
+const CURRENT_VERSION = '0.2.19';
 
 const API_BASE = 'https://kawaii-agent-backend.vercel.app/api/synaptic';
 
@@ -34,7 +33,7 @@ export async function checkForUpdates(): Promise<VersionInfo | null> {
       return null;
     }
 
-    const data = await response.json() as {
+    const data = (await response.json()) as {
       latestVersion?: string;
       updateAvailable?: boolean;
       forceUpdate?: boolean;

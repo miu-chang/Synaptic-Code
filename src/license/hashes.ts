@@ -4,5 +4,5 @@
  */
 export const EMBEDDED_HASHES: Record<string, string> = {
   license: '6a39b502d81745d39d967e84d3138d98e08578afcf83a81f51b4ecd6ca37c04b',
-  registry: 'f7a4f1dc593c4c06d7a52866154dee9b68d368f2cb059cdc1aceac3af61977bc',
+  registry: 'e88fe05d647f857ceccda2c33af0e8275ca66b49f3e9a7c20b7270d6585c4064',
 };

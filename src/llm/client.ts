@@ -3,12 +3,38 @@ import type {
   ChatCompletionRequest,
   ChatCompletionResponse,
   Message,
-  StreamChunk,
   StreamResponse,
+  ToolCall,
+  ToolDefinition,
   Usage,
 } from './types.js';
 import { getTextContent } from './types.js';
 
+/**
+ * Models known to not support OpenAI-style tool/function calling.
+ * For these models we strip `tools` / `tool_choice` from the request body.
+ */
+const NO_TOOL_SUPPORT_PATTERNS: RegExp[] = [
+  /phi-?[0-9]/i,
+  /tinyllama/i,
+  /stablelm/i,
+  /falcon/i,
+  /mpt/i,
+  /dolly/i,
+  /codellama/i,
+  /deepseek-coder/i,
+];
+
+function modelSupportsTools(modelName: string): boolean {
+  return !NO_TOOL_SUPPORT_PATTERNS.some((pattern) => pattern.test(modelName));
+}
+
+/**
+ * OpenAI-compatible client (LM Studio, llama.cpp server, vLLM, openai-local, ...).
+ *
+ * Supports `reasoningEffort` by routing to the `/responses` streaming endpoint
+ * (with `reasoning: { effort }`) and falling back to `/chat/completions` on error.
+ */
 export class OpenAICompatibleClient implements LLMClient {
   private baseUrl: string;
   private defaultModel: string;
@@ -19,14 +45,23 @@ export class OpenAICompatibleClient implements LLMClient {
   }
 
   async chat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+    const model = request.model || this.defaultModel;
+    const supportsTools = modelSupportsTools(model);
+
+    const body: Record<string, unknown> = {
+      ...request,
+      model,
+      stream: false,
+    };
+    if (!supportsTools) {
+      delete body.tools;
+      delete body.tool_choice;
+    }
+
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ...request,
-        model: request.model || this.defaultModel,
-        stream: false,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
@@ -41,26 +76,156 @@ export class OpenAICompatibleClient implements LLMClient {
     onChunk: (chunk: string) => void,
     signal?: AbortSignal
   ): Promise<StreamResponse> {
-    // Create timeout signal (5 minutes max for long responses)
-    const timeoutMs = 300000;
+    if (request.reasoningEffort) {
+      try {
+        return await this.chatStreamResponses(request, onChunk, signal);
+      } catch {
+        // Fall through to /chat/completions
+      }
+    }
+    return this.chatStreamCompletions(request, onChunk, signal);
+  }
+
+  /**
+   * Streaming via the `/responses` endpoint, which carries reasoning metadata.
+   */
+  private async chatStreamResponses(
+    request: ChatCompletionRequest,
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
+  ): Promise<StreamResponse> {
+    const model = request.model || this.defaultModel;
+    const systemMsg = request.messages.find((m) => m.role === 'system');
+    const otherMsgs = request.messages.filter((m) => m.role !== 'system');
+
+    let input: string | { role: string; content: string }[];
+    if (otherMsgs.length === 1) {
+      input = getTextContent(otherMsgs[0].content);
+    } else {
+      input = otherMsgs.map((m) => ({
+        role: m.role,
+        content: getTextContent(m.content),
+      }));
+    }
+
+    const body: Record<string, unknown> = {
+      model,
+      input,
+      stream: true,
+      reasoning: { effort: request.reasoningEffort },
+    };
+    if (systemMsg) {
+      body.instructions = getTextContent(systemMsg.content);
+    }
+    if (request.temperature !== undefined) {
+      body.temperature = request.temperature;
+    }
+
+    const response = await fetch(`${this.baseUrl}/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Responses API error: ${response.status} ${response.statusText}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No response body');
+
+    const decoder = new TextDecoder();
+    let fullContent = '';
+    let usage: Usage | undefined;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      const lines = text.split('\n').filter((line) => line.startsWith('data: '));
+
+      for (const line of lines) {
+        const data = line.slice(6);
+        if (data === '[DONE]') continue;
+        try {
+          const event = JSON.parse(data);
+          if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+            fullContent += event.delta;
+            onChunk(event.delta);
+          }
+          if (event.output && Array.isArray(event.output)) {
+            for (const item of event.output) {
+              if (item.type === 'message' && item.content) {
+                for (const c of item.content) {
+                  if (c.type === 'output_text' && c.text) {
+                    fullContent += c.text;
+                    onChunk(c.text);
+                  }
+                }
+              }
+            }
+          }
+          if (event.usage && typeof event.usage === 'object') {
+            const u = event.usage;
+            usage = {
+              prompt_tokens: u.input_tokens || 0,
+              completion_tokens: u.output_tokens || 0,
+              total_tokens: (u.input_tokens || 0) + (u.output_tokens || 0),
+            };
+          }
+        } catch {
+          // Ignore malformed SSE frames
+        }
+      }
+    }
+
+    // Strip channel/role markers some local servers emit, e.g. <|channel|>...
+    fullContent = fullContent.replace(/<\|[^>]*>/g, '');
+
+    return {
+      message: { role: 'assistant', content: fullContent },
+      usage,
+    };
+  }
+
+  /**
+   * Streaming via the standard `/chat/completions` endpoint.
+   */
+  private async chatStreamCompletions(
+    request: ChatCompletionRequest,
+    onChunk: (chunk: string) => void,
+    signal?: AbortSignal
+  ): Promise<StreamResponse> {
+    // 30 minute hard cap for very long generations.
+    const timeoutMs = 1800000;
     const timeoutController = new AbortController();
     const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
-
-    // Combine with user signal
     const combinedSignal = signal
       ? AbortSignal.any([signal, timeoutController.signal])
       : timeoutController.signal;
+
+    const model = request.model || this.defaultModel;
+    const supportsTools = modelSupportsTools(model);
+
+    const body: Record<string, unknown> = {
+      ...request,
+      model,
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    // reasoningEffort is consumed by chatStreamResponses; not a /chat/completions field.
+    delete body.reasoningEffort;
+    if (!supportsTools) {
+      delete body.tools;
+      delete body.tool_choice;
+    }
 
     try {
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...request,
-          model: request.model || this.defaultModel,
-          stream: true,
-          stream_options: { include_usage: true },
-        }),
+        body: JSON.stringify(body),
         signal: combinedSignal,
       });
 
@@ -74,43 +239,36 @@ export class OpenAICompatibleClient implements LLMClient {
       const decoder = new TextDecoder();
       let fullContent = '';
       let usage: Usage | undefined;
-      const toolCallsMap: Map<number, { id: string; type: 'function'; function: { name: string; arguments: string } }> = new Map();
+      const toolCallsMap = new Map<number, ToolCall>();
+
       let lastChunkTime = Date.now();
-      const chunkTimeout = 60000; // 60s timeout between chunks
+      const chunkTimeout = 180000;
 
       while (true) {
-        // Check for chunk timeout
         if (Date.now() - lastChunkTime > chunkTimeout) {
           reader.cancel();
           throw new Error('Stream timeout: no data received for 60 seconds');
         }
-
         const { done, value } = await reader.read();
         if (done) break;
-
         lastChunkTime = Date.now();
+
         const text = decoder.decode(value, { stream: true });
         const lines = text.split('\n').filter((line) => line.startsWith('data: '));
 
         for (const line of lines) {
           const data = line.slice(6);
           if (data === '[DONE]') continue;
-
           try {
-            const chunk: StreamChunk = JSON.parse(data);
-
-            // Capture usage from final chunk
+            const chunk = JSON.parse(data);
             if (chunk.usage) {
               usage = chunk.usage;
             }
-
             const delta = chunk.choices[0]?.delta;
-
             if (delta?.content) {
               fullContent += delta.content;
               onChunk(delta.content);
             }
-
             if (delta?.tool_calls) {
               for (const tc of delta.tool_calls) {
                 if (!toolCallsMap.has(tc.index)) {
@@ -121,19 +279,13 @@ export class OpenAICompatibleClient implements LLMClient {
                   });
                 }
                 const existing = toolCallsMap.get(tc.index)!;
-                if (tc.id) {
-                  existing.id = tc.id;
-                }
-                if (tc.function?.name) {
-                  existing.function.name += tc.function.name;
-                }
-                if (tc.function?.arguments) {
-                  existing.function.arguments += tc.function.arguments;
-                }
+                if (tc.id) existing.id = tc.id;
+                if (tc.function?.name) existing.function.name += tc.function.name;
+                if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
               }
             }
           } catch {
-            // Skip invalid JSON
+            // Ignore malformed SSE frames
           }
         }
       }
@@ -142,11 +294,9 @@ export class OpenAICompatibleClient implements LLMClient {
         role: 'assistant',
         content: fullContent,
       };
-
       if (toolCallsMap.size > 0) {
         message.tool_calls = Array.from(toolCallsMap.values());
       }
-
       return { message, usage };
     } finally {
       clearTimeout(timeoutId);
@@ -158,12 +308,14 @@ export class OpenAICompatibleClient implements LLMClient {
     if (!response.ok) {
       throw new Error(`Failed to list models: ${response.status}`);
     }
-
-    const data = await response.json() as { data?: { id: string }[] };
+    const data = (await response.json()) as { data?: { id: string }[] };
     return data.data?.map((m) => m.id) || [];
   }
 }
 
+/**
+ * Native Ollama API client (`/api/chat`, `/api/tags`).
+ */
 export class OllamaClient implements LLMClient {
   private baseUrl: string;
   private defaultModel: string;
@@ -192,7 +344,7 @@ export class OllamaClient implements LLMClient {
       throw new Error(`Ollama API error: ${response.status}`);
     }
 
-    const data = await response.json() as { message: Message };
+    const data = (await response.json()) as { message: Message };
     return {
       id: `ollama-${Date.now()}`,
       object: 'chat.completion',
@@ -238,22 +390,16 @@ export class OllamaClient implements LLMClient {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       const text = decoder.decode(value, { stream: true });
       const lines = text.split('\n').filter((line) => line.trim());
 
       for (const line of lines) {
         try {
-          const data = JSON.parse(line) as {
-            message?: { content?: string };
-            prompt_eval_count?: number;
-            eval_count?: number;
-          };
+          const data = JSON.parse(line);
           if (data.message?.content) {
             fullContent += data.message.content;
             onChunk(data.message.content);
           }
-          // Ollama returns token counts in final message
           if (data.prompt_eval_count !== undefined || data.eval_count !== undefined) {
             usage = {
               prompt_tokens: data.prompt_eval_count || 0,
@@ -262,7 +408,7 @@ export class OllamaClient implements LLMClient {
             };
           }
         } catch {
-          // Skip invalid JSON
+          // Ignore malformed lines
         }
       }
     }
@@ -278,21 +424,24 @@ export class OllamaClient implements LLMClient {
     if (!response.ok) {
       throw new Error(`Failed to list models: ${response.status}`);
     }
-
-    const data = await response.json() as { models?: { name: string }[] };
+    const data = (await response.json()) as { models?: { name: string }[] };
     return data.models?.map((m) => m.name) || [];
   }
 }
 
-// OpenAI Cloud API Client
+/**
+ * Cloud client for OpenAI-compatible providers that require an API key
+ * (OpenAI itself, xAI/Grok via `https://api.x.ai/v1`, ...).
+ */
 export class OpenAICloudClient implements LLMClient {
   private apiKey: string;
   private defaultModel: string;
-  private baseUrl = 'https://api.openai.com/v1';
+  private baseUrl: string;
 
-  constructor(apiKey: string, defaultModel: string) {
+  constructor(apiKey: string, defaultModel: string, baseUrl = 'https://api.openai.com/v1') {
     this.apiKey = apiKey;
     this.defaultModel = defaultModel;
+    this.baseUrl = baseUrl;
   }
 
   async chat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
@@ -300,7 +449,7 @@ export class OpenAICloudClient implements LLMClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
         ...request,
@@ -326,7 +475,7 @@ export class OpenAICloudClient implements LLMClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
         ...request,
@@ -348,29 +497,25 @@ export class OpenAICloudClient implements LLMClient {
     const decoder = new TextDecoder();
     let fullContent = '';
     let usage: Usage | undefined;
-    const toolCallsMap: Map<number, { id: string; type: 'function'; function: { name: string; arguments: string } }> = new Map();
+    const toolCallsMap = new Map<number, ToolCall>();
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       const text = decoder.decode(value, { stream: true });
       const lines = text.split('\n').filter((line) => line.startsWith('data: '));
 
       for (const line of lines) {
         const data = line.slice(6);
         if (data === '[DONE]') continue;
-
         try {
-          const chunk: StreamChunk = JSON.parse(data);
+          const chunk = JSON.parse(data);
           if (chunk.usage) usage = chunk.usage;
-
           const delta = chunk.choices[0]?.delta;
           if (delta?.content) {
             fullContent += delta.content;
             onChunk(delta.content);
           }
-
           if (delta?.tool_calls) {
             for (const tc of delta.tool_calls) {
               if (!toolCallsMap.has(tc.index)) {
@@ -387,7 +532,7 @@ export class OpenAICloudClient implements LLMClient {
             }
           }
         } catch {
-          // Skip invalid JSON
+          // Ignore malformed SSE frames
         }
       }
     }
@@ -396,16 +541,25 @@ export class OpenAICloudClient implements LLMClient {
     if (toolCallsMap.size > 0) {
       message.tool_calls = Array.from(toolCallsMap.values());
     }
-
     return { message, usage };
   }
 
   async listModels(): Promise<string[]> {
-    return ['gpt-5.4', 'gpt-5.4-pro', 'gpt-5.4-mini', 'gpt-5.3-codex'];
+    if (this.baseUrl.includes('x.ai')) {
+      return [
+        'grok-4-1-fast-non-reasoning',
+        'grok-4-1-fast-reasoning',
+        'grok-4.20-0309-non-reasoning',
+        'grok-4.20-0309-reasoning',
+      ];
+    }
+    return ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.3-codex'];
   }
 }
 
-// Anthropic Claude API Client
+/**
+ * Anthropic Messages API client.
+ */
 export class AnthropicClient implements LLMClient {
   private apiKey: string;
   private defaultModel: string;
@@ -416,22 +570,24 @@ export class AnthropicClient implements LLMClient {
     this.defaultModel = defaultModel;
   }
 
-  private convertToAnthropicMessages(messages: Message[]): { system?: string; messages: Array<{ role: string; content: string }> } {
-    const systemMsg = messages.find(m => m.role === 'system');
-    const otherMsgs = messages.filter(m => m.role !== 'system');
-
+  private convertToAnthropicMessages(messages: Message[]): {
+    system: string | undefined;
+    messages: { role: 'assistant' | 'user'; content: string }[];
+  } {
+    const systemMsg = messages.find((m) => m.role === 'system');
+    const otherMsgs = messages.filter((m) => m.role !== 'system');
     return {
       system: systemMsg ? getTextContent(systemMsg.content) : undefined,
-      messages: otherMsgs.map(m => ({
+      messages: otherMsgs.map((m) => ({
         role: m.role === 'assistant' ? 'assistant' : 'user',
         content: getTextContent(m.content),
       })),
     };
   }
 
-  private convertToolsToAnthropic(tools?: ChatCompletionRequest['tools']): Array<{ name: string; description: string; input_schema: unknown }> | undefined {
+  private convertToolsToAnthropic(tools?: ToolDefinition[]) {
     if (!tools) return undefined;
-    return tools.map(t => ({
+    return tools.map((t) => ({
       name: t.function.name,
       description: t.function.description,
       input_schema: t.function.parameters,
@@ -440,14 +596,12 @@ export class AnthropicClient implements LLMClient {
 
   async chat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
     const { system, messages } = this.convertToAnthropicMessages(request.messages);
-
     const body: Record<string, unknown> = {
       model: request.model || this.defaultModel,
       max_tokens: request.max_tokens || 8192,
       messages,
     };
     if (system) body.system = system;
-
     const anthropicTools = this.convertToolsToAnthropic(request.tools);
     if (anthropicTools) body.tools = anthropicTools;
 
@@ -466,26 +620,23 @@ export class AnthropicClient implements LLMClient {
       throw new Error(`Anthropic API error: ${response.status} - ${err}`);
     }
 
-    const data = await response.json() as {
+    const data = (await response.json()) as {
       id: string;
-      content: Array<{ type: string; text?: string; id?: string; name?: string; input?: unknown }>;
-      usage: { input_tokens: number; output_tokens: number };
+      content: { type: string; text?: string; id?: string; name?: string; input?: unknown }[];
       stop_reason: string;
+      usage: { input_tokens: number; output_tokens: number };
     };
-
-    // Convert Anthropic response to OpenAI format
-    const textContent = data.content.find(c => c.type === 'text');
-    const toolUses = data.content.filter(c => c.type === 'tool_use');
+    const textContent = data.content.find((c) => c.type === 'text');
+    const toolUses = data.content.filter((c) => c.type === 'tool_use');
 
     const message: Message = {
       role: 'assistant',
       content: textContent?.text || '',
     };
-
     if (toolUses.length > 0) {
-      message.tool_calls = toolUses.map(t => ({
+      message.tool_calls = toolUses.map((t) => ({
         id: t.id || '',
-        type: 'function' as const,
+        type: 'function',
         function: {
           name: t.name || '',
           arguments: JSON.stringify(t.input),
@@ -513,7 +664,6 @@ export class AnthropicClient implements LLMClient {
     signal?: AbortSignal
   ): Promise<StreamResponse> {
     const { system, messages } = this.convertToAnthropicMessages(request.messages);
-
     const body: Record<string, unknown> = {
       model: request.model || this.defaultModel,
       max_tokens: request.max_tokens || 8192,
@@ -521,7 +671,6 @@ export class AnthropicClient implements LLMClient {
       stream: true,
     };
     if (system) body.system = system;
-
     const anthropicTools = this.convertToolsToAnthropic(request.tools);
     if (anthropicTools) body.tools = anthropicTools;
 
@@ -547,29 +696,20 @@ export class AnthropicClient implements LLMClient {
     const decoder = new TextDecoder();
     let fullContent = '';
     let usage: Usage | undefined;
-    const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
+    const toolCalls: ToolCall[] = [];
     let currentToolIndex = -1;
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       const text = decoder.decode(value, { stream: true });
-      const lines = text.split('\n').filter(line => line.startsWith('data: '));
+      const lines = text.split('\n').filter((line) => line.startsWith('data: '));
 
       for (const line of lines) {
         const data = line.slice(6);
         if (!data) continue;
-
         try {
-          const event = JSON.parse(data) as {
-            type: string;
-            delta?: { type: string; text?: string; partial_json?: string };
-            content_block?: { type: string; id?: string; name?: string };
-            usage?: { input_tokens: number; output_tokens: number };
-            message?: { usage: { input_tokens: number; output_tokens: number } };
-          };
-
+          const event = JSON.parse(data);
           if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
             currentToolIndex++;
             toolCalls.push({
@@ -578,17 +718,19 @@ export class AnthropicClient implements LLMClient {
               function: { name: event.content_block.name || '', arguments: '' },
             });
           }
-
           if (event.type === 'content_block_delta') {
             if (event.delta?.type === 'text_delta' && event.delta.text) {
               fullContent += event.delta.text;
               onChunk(event.delta.text);
             }
-            if (event.delta?.type === 'input_json_delta' && event.delta.partial_json && currentToolIndex >= 0) {
+            if (
+              event.delta?.type === 'input_json_delta' &&
+              event.delta.partial_json &&
+              currentToolIndex >= 0
+            ) {
               toolCalls[currentToolIndex].function.arguments += event.delta.partial_json;
             }
           }
-
           if (event.type === 'message_delta' && event.usage) {
             usage = {
               prompt_tokens: event.usage.input_tokens,
@@ -596,16 +738,16 @@ export class AnthropicClient implements LLMClient {
               total_tokens: event.usage.input_tokens + event.usage.output_tokens,
             };
           }
-
           if (event.type === 'message_start' && event.message?.usage) {
             usage = {
               prompt_tokens: event.message.usage.input_tokens,
               completion_tokens: event.message.usage.output_tokens,
-              total_tokens: event.message.usage.input_tokens + event.message.usage.output_tokens,
+              total_tokens:
+                event.message.usage.input_tokens + event.message.usage.output_tokens,
             };
           }
         } catch {
-          // Skip invalid JSON
+          // Ignore malformed SSE frames
         }
       }
     }
@@ -614,16 +756,23 @@ export class AnthropicClient implements LLMClient {
     if (toolCalls.length > 0) {
       message.tool_calls = toolCalls;
     }
-
     return { message, usage };
   }
 
   async listModels(): Promise<string[]> {
-    return ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
+    return [
+      'claude-opus-4-6',
+      'claude-sonnet-4-6',
+      'claude-opus-4-5',
+      'claude-sonnet-4-5',
+      'claude-haiku-4-5',
+    ];
   }
 }
 
-// Google Gemini API Client
+/**
+ * Google Gemini client (`generativelanguage.googleapis.com`).
+ */
 export class GeminiClient implements LLMClient {
   private apiKey: string;
   private defaultModel: string;
@@ -634,72 +783,81 @@ export class GeminiClient implements LLMClient {
     this.defaultModel = defaultModel;
   }
 
-  private convertToGeminiMessages(messages: Message[]): { systemInstruction?: { parts: { text: string }[] }; contents: Array<{ role: string; parts: { text: string }[] }> } {
-    const systemMsg = messages.find(m => m.role === 'system');
-    const otherMsgs = messages.filter(m => m.role !== 'system');
-
+  private convertToGeminiMessages(messages: Message[]): {
+    systemInstruction: { parts: { text: string }[] } | undefined;
+    contents: { role: 'user' | 'model'; parts: { text: string }[] }[];
+  } {
+    const systemMsg = messages.find((m) => m.role === 'system');
+    const otherMsgs = messages.filter((m) => m.role !== 'system');
     return {
-      systemInstruction: systemMsg ? { parts: [{ text: getTextContent(systemMsg.content) }] } : undefined,
-      contents: otherMsgs.map(m => ({
+      systemInstruction: systemMsg
+        ? { parts: [{ text: getTextContent(systemMsg.content) }] }
+        : undefined,
+      contents: otherMsgs.map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: getTextContent(m.content) }],
       })),
     };
   }
 
-  private convertToolsToGemini(tools?: ChatCompletionRequest['tools']): Array<{ functionDeclarations: Array<{ name: string; description: string; parameters: unknown }> }> | undefined {
+  private convertToolsToGemini(tools?: ToolDefinition[]) {
     if (!tools) return undefined;
-    return [{
-      functionDeclarations: tools.map(t => ({
-        name: t.function.name,
-        description: t.function.description,
-        parameters: t.function.parameters,
-      })),
-    }];
+    return [
+      {
+        functionDeclarations: tools.map((t) => ({
+          name: t.function.name,
+          description: t.function.description,
+          parameters: t.function.parameters,
+        })),
+      },
+    ];
   }
 
   async chat(request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
     const model = request.model || this.defaultModel;
     const { systemInstruction, contents } = this.convertToGeminiMessages(request.messages);
-
     const body: Record<string, unknown> = { contents };
     if (systemInstruction) body.systemInstruction = systemInstruction;
-
     const geminiTools = this.convertToolsToGemini(request.tools);
     if (geminiTools) body.tools = geminiTools;
 
-    const response = await fetch(`${this.baseUrl}/models/${model}:generateContent?key=${this.apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const response = await fetch(
+      `${this.baseUrl}/models/${model}:generateContent?key=${this.apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
 
     if (!response.ok) {
       const err = await response.text();
       throw new Error(`Gemini API error: ${response.status} - ${err}`);
     }
 
-    const data = await response.json() as {
-      candidates: Array<{
-        content: { parts: Array<{ text?: string; functionCall?: { name: string; args: unknown } }> };
-        finishReason: string;
-      }>;
-      usageMetadata: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+    const data = (await response.json()) as {
+      candidates: {
+        content?: { parts: { text?: string; functionCall?: { name: string; args: unknown } }[] };
+        finishReason?: string;
+      }[];
+      usageMetadata?: {
+        promptTokenCount?: number;
+        candidatesTokenCount?: number;
+        totalTokenCount?: number;
+      };
     };
-
     const parts = data.candidates[0]?.content?.parts || [];
-    const textPart = parts.find(p => p.text);
-    const functionCalls = parts.filter(p => p.functionCall);
+    const textPart = parts.find((p) => p.text);
+    const functionCalls = parts.filter((p) => p.functionCall);
 
     const message: Message = {
       role: 'assistant',
       content: textPart?.text || '',
     };
-
     if (functionCalls.length > 0) {
       message.tool_calls = functionCalls.map((p, i) => ({
         id: `call_${i}`,
-        type: 'function' as const,
+        type: 'function',
         function: {
           name: p.functionCall!.name,
           arguments: JSON.stringify(p.functionCall!.args),
@@ -712,7 +870,13 @@ export class GeminiClient implements LLMClient {
       object: 'chat.completion',
       created: Date.now(),
       model,
-      choices: [{ index: 0, message, finish_reason: data.candidates[0]?.finishReason || 'stop' }],
+      choices: [
+        {
+          index: 0,
+          message,
+          finish_reason: data.candidates[0]?.finishReason || 'stop',
+        },
+      ],
       usage: {
         prompt_tokens: data.usageMetadata?.promptTokenCount || 0,
         completion_tokens: data.usageMetadata?.candidatesTokenCount || 0,
@@ -728,19 +892,20 @@ export class GeminiClient implements LLMClient {
   ): Promise<StreamResponse> {
     const model = request.model || this.defaultModel;
     const { systemInstruction, contents } = this.convertToGeminiMessages(request.messages);
-
     const body: Record<string, unknown> = { contents };
     if (systemInstruction) body.systemInstruction = systemInstruction;
-
     const geminiTools = this.convertToolsToGemini(request.tools);
     if (geminiTools) body.tools = geminiTools;
 
-    const response = await fetch(`${this.baseUrl}/models/${model}:streamGenerateContent?alt=sse&key=${this.apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal,
-    });
+    const response = await fetch(
+      `${this.baseUrl}/models/${model}:streamGenerateContent?alt=sse&key=${this.apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal,
+      }
+    );
 
     if (!response.ok) {
       const err = await response.text();
@@ -753,25 +918,19 @@ export class GeminiClient implements LLMClient {
     const decoder = new TextDecoder();
     let fullContent = '';
     let usage: Usage | undefined;
-    const toolCalls: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }> = [];
+    const toolCalls: ToolCall[] = [];
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       const text = decoder.decode(value, { stream: true });
-      const lines = text.split('\n').filter(line => line.startsWith('data: '));
+      const lines = text.split('\n').filter((line) => line.startsWith('data: '));
 
       for (const line of lines) {
         const data = line.slice(6);
         if (!data) continue;
-
         try {
-          const chunk = JSON.parse(data) as {
-            candidates?: Array<{ content: { parts: Array<{ text?: string; functionCall?: { name: string; args: unknown } }> } }>;
-            usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
-          };
-
+          const chunk = JSON.parse(data);
           const parts = chunk.candidates?.[0]?.content?.parts || [];
           for (const part of parts) {
             if (part.text) {
@@ -789,7 +948,6 @@ export class GeminiClient implements LLMClient {
               });
             }
           }
-
           if (chunk.usageMetadata) {
             usage = {
               prompt_tokens: chunk.usageMetadata.promptTokenCount,
@@ -798,7 +956,7 @@ export class GeminiClient implements LLMClient {
             };
           }
         } catch {
-          // Skip invalid JSON
+          // Ignore malformed SSE frames
         }
       }
     }
@@ -807,7 +965,6 @@ export class GeminiClient implements LLMClient {
     if (toolCalls.length > 0) {
       message.tool_calls = toolCalls;
     }
-
     return { message, usage };
   }
 
@@ -816,13 +973,16 @@ export class GeminiClient implements LLMClient {
   }
 }
 
-// Remote Synaptic Server Client
+/**
+ * Remote relay client — talks to a Synaptic-hosted relay that fronts an
+ * OpenAI-compatible API at `/v1`.
+ */
 export class RemoteClient implements LLMClient {
   private baseUrl: string;
   private apiKey: string;
   private defaultModel: string;
 
-  constructor(baseUrl: string, apiKey: string, defaultModel: string = 'default') {
+  constructor(baseUrl: string, apiKey: string, defaultModel = 'default') {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.apiKey = apiKey;
     this.defaultModel = defaultModel;
@@ -833,7 +993,7 @@ export class RemoteClient implements LLMClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
         ...request,
@@ -859,7 +1019,7 @@ export class RemoteClient implements LLMClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({
         ...request,
@@ -881,29 +1041,25 @@ export class RemoteClient implements LLMClient {
     const decoder = new TextDecoder();
     let fullContent = '';
     let usage: Usage | undefined;
-    const toolCallsMap: Map<number, { id: string; type: 'function'; function: { name: string; arguments: string } }> = new Map();
+    const toolCallsMap = new Map<number, ToolCall>();
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       const text = decoder.decode(value, { stream: true });
       const lines = text.split('\n').filter((line) => line.startsWith('data: '));
 
       for (const line of lines) {
         const data = line.slice(6);
         if (data === '[DONE]') continue;
-
         try {
-          const chunk: StreamChunk = JSON.parse(data);
+          const chunk = JSON.parse(data);
           if (chunk.usage) usage = chunk.usage;
-
           const delta = chunk.choices[0]?.delta;
           if (delta?.content) {
             fullContent += delta.content;
             onChunk(delta.content);
           }
-
           if (delta?.tool_calls) {
             for (const tc of delta.tool_calls) {
               if (!toolCallsMap.has(tc.index)) {
@@ -920,7 +1076,7 @@ export class RemoteClient implements LLMClient {
             }
           }
         } catch {
-          // Skip invalid JSON
+          // Ignore malformed SSE frames
         }
       }
     }
@@ -929,26 +1085,39 @@ export class RemoteClient implements LLMClient {
     if (toolCallsMap.size > 0) {
       message.tool_calls = Array.from(toolCallsMap.values());
     }
-
     return { message, usage };
   }
 
   async listModels(): Promise<string[]> {
     const response = await fetch(`${this.baseUrl}/v1/models`, {
-      headers: { 'Authorization': `Bearer ${this.apiKey}` },
+      headers: { Authorization: `Bearer ${this.apiKey}` },
     });
     if (!response.ok) {
       throw new Error(`Failed to list models: ${response.status}`);
     }
-    const data = await response.json() as { data?: { id: string }[] };
+    const data = (await response.json()) as { data?: { id: string }[] };
     return data.data?.map((m) => m.id) || [];
   }
 }
 
-import type { ProviderType, RemoteConfig } from '../config/settings.js';
+export type Provider =
+  | 'ollama'
+  | 'lmstudio'
+  | 'openai-local'
+  | 'openai'
+  | 'xai'
+  | 'anthropic'
+  | 'google';
 
+/**
+ * Factory: build an LLMClient for a local or cloud provider.
+ *
+ * For `ollama`, `baseUrlOrApiKey` is a base URL.
+ * For `openai`/`xai`/`anthropic`/`google`, it is an API key.
+ * For `lmstudio`/`openai-local` it is a base URL.
+ */
 export function createClient(
-  provider: ProviderType,
+  provider: Provider | string,
   baseUrlOrApiKey: string,
   model: string
 ): LLMClient {
@@ -960,6 +1129,8 @@ export function createClient(
       return new OpenAICompatibleClient(baseUrlOrApiKey, model);
     case 'openai':
       return new OpenAICloudClient(baseUrlOrApiKey, model);
+    case 'xai':
+      return new OpenAICloudClient(baseUrlOrApiKey, model, 'https://api.x.ai/v1');
     case 'anthropic':
       return new AnthropicClient(baseUrlOrApiKey, model);
     case 'google':
@@ -969,9 +1140,15 @@ export function createClient(
   }
 }
 
+export interface RemoteClientConfig {
+  url: string;
+  apiKey: string;
+  model?: string;
+}
+
 /**
- * Create a remote client for Synaptic server
+ * Factory: build a RemoteClient from a config object.
  */
-export function createRemoteClient(config: RemoteConfig): LLMClient {
+export function createRemoteClient(config: RemoteClientConfig): RemoteClient {
   return new RemoteClient(config.url, config.apiKey, config.model);
 }

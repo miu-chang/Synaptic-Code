@@ -5,13 +5,24 @@ export const webFetchTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'web_fetch',
-      description: 'Fetch content from a URL and extract text',
+      description:
+        'Fetch content from a URL. Supports GET (default) and POST/PUT/DELETE/PATCH with optional body and headers.',
       parameters: {
         type: 'object',
         properties: {
-          url: {
+          url: { type: 'string', description: 'The URL to fetch' },
+          method: {
             type: 'string',
-            description: 'The URL to fetch',
+            description: 'HTTP method: GET, POST, PUT, DELETE, PATCH (default: GET)',
+          },
+          body: {
+            type: 'string',
+            description:
+              'Request body for POST/PUT/PATCH (string or JSON-stringified object)',
+          },
+          headers: {
+            type: 'object',
+            description: 'Additional HTTP headers as key-value pairs',
           },
           selector: {
             type: 'string',
@@ -23,36 +34,78 @@ export const webFetchTool: ToolHandler = {
     },
   },
   async execute(args) {
-    const { url } = args as { url: string; selector?: string };
+    const {
+      url,
+      method = 'GET',
+      body: reqBody,
+      headers: extraHeaders,
+    } = args as {
+      url: string;
+      method?: string;
+      body?: string;
+      headers?: Record<string, string>;
+      selector?: string;
+    };
+    const upperMethod = (method || 'GET').toUpperCase();
 
     try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; LocalCode/1.0)',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-      });
+      let content = '';
+      let contentType = '';
 
-      if (!response.ok) {
-        return JSON.stringify({
-          error: `HTTP ${response.status}: ${response.statusText}`,
-          url,
-        });
+      try {
+        const headers: Record<string, string> = {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          Accept:
+            'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8',
+          ...(extraHeaders || {}),
+        };
+        const init: RequestInit = { method: upperMethod, headers };
+        if (reqBody && upperMethod !== 'GET' && upperMethod !== 'HEAD') {
+          init.body = reqBody;
+          if (!headers['Content-Type'] && !headers['content-type']) {
+            const trimmed = reqBody.trim();
+            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+              headers['Content-Type'] = 'application/json';
+            }
+          }
+        }
+        const response = await fetch(url, init);
+        if (response.ok) {
+          contentType = response.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const json = await response.json();
+            content = JSON.stringify(json, null, 2);
+          } else {
+            content = await response.text();
+          }
+        }
+      } catch {}
+
+      if (!content) {
+        try {
+          const { execSync } = await import('child_process');
+          const { platform } = await import('os');
+          const isWin = platform() === 'win32';
+          const curlCmd = `curl -s -L -m 15 "${url}" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"`;
+          content = execSync(curlCmd, {
+            encoding: 'utf-8',
+            timeout: 20000,
+            shell: isWin ? 'cmd.exe' : undefined,
+          });
+        } catch {
+          return JSON.stringify({
+            error: 'Fetch failed: Unable to connect',
+            url,
+          });
+        }
       }
 
-      const contentType = response.headers.get('content-type') || '';
-      let content: string;
-
-      if (contentType.includes('application/json')) {
-        const json = await response.json();
-        content = JSON.stringify(json, null, 2);
-      } else {
-        const html = await response.text();
-        // Simple HTML to text conversion
-        content = htmlToText(html);
+      if (!contentType.includes('application/json')) {
+        content = htmlToText(content);
       }
 
-      // Truncate if too long
       const maxLength = 20000;
       if (content.length > maxLength) {
         content = content.slice(0, maxLength) + '\n\n... [content truncated]';
@@ -103,25 +156,44 @@ export const webSearchTool: ToolHandler = {
     };
 
     try {
-      // Use DuckDuckGo HTML search (no API key required)
-      const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-
-      const response = await fetch(searchUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; LocalCode/1.0)',
-        },
-      });
-
-      if (!response.ok) {
-        return JSON.stringify({
-          error: `Search failed: HTTP ${response.status}`,
-          query,
+      let html = '';
+      try {
+        const searchUrl = 'https://html.duckduckgo.com/html/';
+        const response = await fetch(searchUrl, {
+          method: 'POST',
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Referer: 'https://html.duckduckgo.com/',
+            'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8',
+          },
+          body: `q=${encodeURIComponent(query)}`,
         });
+        if (response.ok) {
+          html = await response.text();
+        }
+      } catch {}
+
+      if (html.length < 1000) {
+        try {
+          const { execSync } = await import('child_process');
+          const { platform } = await import('os');
+          const isWin = platform() === 'win32';
+          const curlCmd = isWin
+            ? `curl -s -X POST "https://html.duckduckgo.com/html/" -d "q=${encodeURIComponent(query)}" -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36" -H "Referer: https://html.duckduckgo.com/"`
+            : `curl -s -X POST 'https://html.duckduckgo.com/html/' -d 'q=${encodeURIComponent(query)}' -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' -H 'Referer: https://html.duckduckgo.com/'`;
+          html = isWin
+            ? execSync(curlCmd, {
+                encoding: 'utf-8',
+                timeout: 15000,
+                shell: 'cmd.exe',
+              })
+            : execSync(curlCmd, { encoding: 'utf-8', timeout: 15000 });
+        } catch {}
       }
 
-      const html = await response.text();
       const results = parseDuckDuckGoResults(html, maxResults);
-
       return JSON.stringify({
         query,
         resultCount: results.length,
@@ -138,19 +210,15 @@ export const webSearchTool: ToolHandler = {
 
 function htmlToText(html: string): string {
   return html
-    // Remove scripts and styles
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    // Remove HTML tags
     .replace(/<[^>]+>/g, ' ')
-    // Decode HTML entities
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    // Clean up whitespace
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -160,10 +228,8 @@ function parseDuckDuckGoResults(
   maxResults: number
 ): { title: string; url: string; snippet: string }[] {
   const results: { title: string; url: string; snippet: string }[] = [];
-
-  // Simple regex-based parsing for DuckDuckGo HTML results
   const resultRegex =
-    /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([^<]*)/gi;
+    /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
 
   let match;
   while ((match = resultRegex.exec(html)) !== null && results.length < maxResults) {
@@ -177,7 +243,6 @@ function parseDuckDuckGoResults(
     }
   }
 
-  // Fallback: try alternative parsing
   if (results.length === 0) {
     const linkRegex = /<a[^>]*href="(https?:\/\/[^"]*)"[^>]*>([^<]+)<\/a>/gi;
     while ((match = linkRegex.exec(html)) !== null && results.length < maxResults) {

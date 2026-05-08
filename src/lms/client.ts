@@ -45,6 +45,11 @@ function getLmsPath(): string {
 
 const LMS_PATH = getLmsPath();
 
+// Common LM Studio ports to scan for dynamic detection
+const LM_STUDIO_PORTS = [1234, 8084, 8080, 8000, 5000];
+let detectedPort: number | null = null;
+let detectedHost: string = 'localhost';
+
 export interface LmsModel {
   name: string;
   params: string;
@@ -71,18 +76,76 @@ export function isLmsInstalled(): boolean {
 }
 
 /**
- * Check if LM Studio server is running
+ * Probe a single host:port to see if LM Studio responds with /v1/models
  */
-export async function isServerRunning(): Promise<boolean> {
+async function checkLmStudioPort(port: number, host: string = 'localhost'): Promise<boolean> {
   try {
-    const response = await fetch('http://localhost:1234/v1/models', {
+    const response = await fetch(`http://${host}:${port}/v1/models`, {
       method: 'GET',
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(1500),
     });
-    return response.ok;
+    if (response.ok) {
+      const data = await response.json();
+      return Array.isArray((data as { data?: unknown })?.data);
+    }
+    return false;
   } catch {
     return false;
   }
+}
+
+/**
+ * Detect which port LM Studio is running on (cached after first detection).
+ * Scans common ports on localhost / 127.0.0.1.
+ */
+export async function detectLmStudioPort(): Promise<number | null> {
+  // If we've already detected, verify it's still valid
+  if (detectedPort !== null) {
+    const stillValid = await checkLmStudioPort(detectedPort, detectedHost);
+    if (stillValid) return detectedPort;
+    detectedPort = null;
+  }
+
+  const hosts = ['localhost', '127.0.0.1'];
+  for (const host of hosts) {
+    const results = await Promise.all(
+      LM_STUDIO_PORTS.map(async (port) => {
+        const isLmStudio = await checkLmStudioPort(port, host);
+        return isLmStudio ? port : null;
+      })
+    );
+    const foundPort = results.find((p) => p !== null) ?? null;
+    if (foundPort) {
+      detectedPort = foundPort;
+      detectedHost = host;
+      return foundPort;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Get the full LM Studio base URL (or null if not detected)
+ */
+export async function getLmStudioUrl(): Promise<string | null> {
+  const port = await detectLmStudioPort();
+  return port ? `http://${detectedHost}:${port}` : null;
+}
+
+/**
+ * Get the last detected port (sync, no probing)
+ */
+export function getDetectedPort(): number | null {
+  return detectedPort;
+}
+
+/**
+ * Check if LM Studio server is running on any common port
+ */
+export async function isServerRunning(): Promise<boolean> {
+  const port = await detectLmStudioPort();
+  return port !== null;
 }
 
 /**

@@ -169,8 +169,8 @@ export function findToolServer(toolName: string): SynapticTool | undefined {
   return toolCache.get(toolName);
 }
 
-// Timeout for tool execution (30 seconds)
-const EXECUTE_TIMEOUT = 30000;
+// Timeout for tool execution (5 minutes)
+const EXECUTE_TIMEOUT = 300000;
 
 // Max result size to return (prevent context explosion)
 const MAX_RESULT_SIZE = 10000;
@@ -359,6 +359,35 @@ export async function getToolsByCategory(
 
     const response = await fetch(
       `http://localhost:${serverInfo.port}/tools/category/${encodeURIComponent(category)}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeout);
+
+    if (!response.ok) return [];
+
+    const data = await response.json() as { tools?: ToolInfo[] };
+    return data.tools || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Search tools from a server by keyword
+ */
+export async function searchTools(
+  server: 'blender' | 'unity',
+  query: string
+): Promise<ToolInfo[]> {
+  const serverInfo = connectedServers.get(server);
+  if (!serverInfo) return [];
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(
+      `http://localhost:${serverInfo.port}/tools/search?q=${encodeURIComponent(query)}`,
       { signal: controller.signal }
     );
     clearTimeout(timeout);

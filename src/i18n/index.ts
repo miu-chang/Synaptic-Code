@@ -18,10 +18,8 @@ export function detectSystemLanguage(): Language {
     let locale = '';
 
     if (os === 'darwin') {
-      // macOS: defaults read -g AppleLocale
       locale = execSync('defaults read -g AppleLocale', { encoding: 'utf-8' }).trim();
     } else if (os === 'win32') {
-      // Windows: Get-WinSystemLocale or LANG env
       locale = process.env.LANG || process.env.LC_ALL || '';
       if (!locale) {
         try {
@@ -31,11 +29,9 @@ export function detectSystemLanguage(): Language {
         }
       }
     } else {
-      // Linux: LANG env
       locale = process.env.LANG || process.env.LC_ALL || '';
     }
 
-    // Check if Japanese
     if (locale.toLowerCase().startsWith('ja') || locale.includes('Japan')) {
       return 'ja';
     }
@@ -111,7 +107,12 @@ export interface Translations {
     self: string;
     timeline: string;
     diff: string;
+    memory: string;
+    voice: string;
+    update: string;
     changelog: string;
+    reasoning: string;
+    context: string;
     quit: string;
   };
 
@@ -127,6 +128,20 @@ export interface Translations {
     autoAcceptOn: string;
     autoAcceptOff: string;
     planRejected: string;
+    voiceModeOn: string;
+    voiceModeOff: string;
+    reasoningOff: string;
+    reasoningSet: string;
+    reasoningNone: string;
+    reasoningLow: string;
+    reasoningMedium: string;
+    reasoningHigh: string;
+    voiceRecording: string;
+    voiceTranscribing: string;
+    voiceSkipped: string;
+    voiceNoSpeech: string;
+    voiceInstalling: string;
+    voiceNotAvailable: string;
   };
 
   // Setup wizard
@@ -199,12 +214,13 @@ export interface Translations {
 
     // Model descriptions
     modelDesc: {
-      qwen35_35b: string;
+      qwen36_35b: string;
+      gemma4_26b: string;
       gptOss20b: string;
       qwen35_14b: string;
-      gemma3_12b: string;
       qwen35_9b: string;
-      gemma3_4b: string;
+      qwen35_4b: string;
+      nemotronNano4b: string;
       qwen35_27b: string;
       qwen35_122b: string;
       llama4Maverick: string;
@@ -254,7 +270,6 @@ export interface Translations {
     licenseRequired: string;
     activated: string;
     platform: string;
-    // New translations
     needLicense: string;
     openPurchasePage: string;
     networkRequired: string;
@@ -337,7 +352,12 @@ If asked to do any of the above, politely decline and explain that you cannot as
     self: 'Load self-awareness mode (modify my own code)',
     timeline: 'Show session timeline',
     diff: 'Show file changes diff',
+    memory: 'View/manage saved memories',
+    voice: 'Voice input (push-to-talk)',
+    update: 'Check for updates and auto-update',
     changelog: 'Show version changelog',
+    reasoning: 'Toggle reasoning mode (none/low/medium/high)',
+    context: 'Set context length and reload model',
     quit: 'Exit',
   },
 
@@ -352,6 +372,20 @@ If asked to do any of the above, politely decline and explain that you cannot as
     autoAcceptOn: 'Auto-accept ON (tools execute immediately)',
     autoAcceptOff: 'Auto-accept OFF (destructive tools require approval)',
     planRejected: 'Plan rejected',
+    voiceModeOn: 'Voice mode on ({model}) - Enter: send, Esc: skip, Esc×2: exit',
+    voiceModeOff: 'Voice mode off',
+    reasoningOff: 'Reasoning: OFF (standard mode)',
+    reasoningSet: 'Reasoning: {level} (using /v1/responses API)',
+    reasoningNone: 'Reasoning: NONE (fastest, no thinking)',
+    reasoningLow: 'Reasoning: LOW',
+    reasoningMedium: 'Reasoning: MEDIUM',
+    reasoningHigh: 'Reasoning: HIGH (full thinking)',
+    voiceRecording: '[Recording... press Enter to send]',
+    voiceTranscribing: '[Transcribing...]',
+    voiceSkipped: '(recording skipped)',
+    voiceNoSpeech: '(no speech detected)',
+    voiceInstalling: 'Installing {tool}...',
+    voiceNotAvailable: 'Still not available. Try: {hint}',
   },
 
   setup: {
@@ -426,14 +460,14 @@ If asked to do any of the above, politely decline and explain that you cannot as
     selectModelPrompt: 'Select a model to download:',
     advancedModels: 'Advanced (slower but higher quality):',
 
-    // Model descriptions
     modelDesc: {
-      qwen35_35b: 'Fast & powerful (MoE 3B active) ★Recommended',
-      gptOss20b: 'OpenAI official, natural conversation',
+      qwen36_35b: 'Best tool use & agentic coding (MoE 3B active) ★Recommended',
+      gemma4_26b: 'High quality responses (MoE 4B active)',
+      gptOss20b: 'OpenAI official, natural conversation (85% tool)',
       qwen35_14b: 'Good balance of speed and quality',
-      gemma3_12b: 'Google multimodal model',
       qwen35_9b: 'Lightweight with 262K context',
-      gemma3_4b: 'Minimal footprint, runs anywhere',
+      qwen35_4b: 'Best small model (97.5% tool accuracy) ★Low RAM',
+      nemotronNano4b: 'NVIDIA efficient model (95% tool accuracy)',
       qwen35_27b: 'Highest quality, all params active (slow)',
       qwen35_122b: 'Ultra-large MoE (10B active)',
       llama4Maverick: 'Meta flagship MoE (17B active, 1M context)',
@@ -454,7 +488,6 @@ If asked to do any of the above, politely decline and explain that you cannot as
     finishLater: 'You can finish setup later by running: syn',
   },
 
-  // License
   license: {
     title: 'License',
     stepTitle: 'License Activation',
@@ -481,7 +514,6 @@ If asked to do any of the above, politely decline and explain that you cannot as
     licenseRequired: 'License or trial required to continue',
     activated: 'Activated: {date}',
     platform: 'Platform: {platform}',
-    // New translations
     needLicense: 'Need a license?',
     openPurchasePage: 'Open purchase page in browser?',
     networkRequired: 'Network connection required to start trial.',
@@ -564,7 +596,12 @@ const ja: Translations = {
     self: '自己認識モード（自分のコードを修正）',
     timeline: 'セッションのタイムライン表示',
     diff: 'ファイル変更の差分を表示',
+    memory: '保存済みメモリの表示・管理',
+    voice: '音声入力（プッシュトゥトーク）',
+    update: 'アップデートを確認・自動更新',
     changelog: '更新履歴を表示',
+    reasoning: '推論モード切り替え（none/low/medium/high）',
+    context: 'コンテキスト長を設定してモデル再ロード',
     quit: '終了',
   },
 
@@ -579,6 +616,20 @@ const ja: Translations = {
     autoAcceptOn: '自動実行ON (ツールは即座に実行)',
     autoAcceptOff: '自動実行OFF (破壊的ツールは承認が必要)',
     planRejected: '計画を拒否しました',
+    voiceModeOn: '音声モード開始 ({model}) - Enter: 送信, Esc: やり直し, Esc×2: 終了',
+    voiceModeOff: '音声モード終了',
+    reasoningOff: '推論モード: OFF（通常モード）',
+    reasoningSet: '推論モード: {level}（/v1/responses API使用）',
+    reasoningNone: '推論モード: NONE（最速・思考なし）',
+    reasoningLow: '推論モード: LOW',
+    reasoningMedium: '推論モード: MEDIUM',
+    reasoningHigh: '推論モード: HIGH（フル思考）',
+    voiceRecording: '[録音中... Enterで送信]',
+    voiceTranscribing: '[文字起こし中...]',
+    voiceSkipped: '(録音スキップ)',
+    voiceNoSpeech: '(音声が検出されませんでした)',
+    voiceInstalling: '{tool} をインストール中...',
+    voiceNotAvailable: 'まだ利用できません。手動: {hint}',
   },
 
   setup: {
@@ -653,14 +704,14 @@ const ja: Translations = {
     selectModelPrompt: 'ダウンロードするモデルを選択:',
     advancedModels: '上級者向け (低速だが高品質):',
 
-    // Model descriptions
     modelDesc: {
-      qwen35_35b: '高速・高性能 (MoE 3Bアクティブ) ★推奨',
-      gptOss20b: 'OpenAI公式、自然な会話',
+      qwen36_35b: '最高のツール使用＆エージェントコーディング (MoE 3B) ★推奨',
+      gemma4_26b: '高品質な応答 (MoE 4Bアクティブ)',
+      gptOss20b: 'OpenAI公式、自然な会話 (ツール85%)',
       qwen35_14b: '速度と品質のバランス',
-      gemma3_12b: 'Googleマルチモーダル',
       qwen35_9b: '軽量、262Kコンテキスト',
-      gemma3_4b: '最軽量、どこでも動く',
+      qwen35_4b: '最強小型モデル (ツール精度97.5%) ★低RAM推奨',
+      nemotronNano4b: 'NVIDIA高効率 (ツール精度95%)',
       qwen35_27b: '最高品質、全パラメータ使用 (低速)',
       qwen35_122b: '超大規模MoE (10Bアクティブ)',
       llama4Maverick: 'Meta最強MoE (17Bアクティブ、1Mコンテキスト)',
@@ -681,7 +732,6 @@ const ja: Translations = {
     finishLater: '後で syn を実行してセットアップを完了できます',
   },
 
-  // License
   license: {
     title: 'ライセンス',
     stepTitle: 'ライセンス認証',
@@ -708,7 +758,6 @@ const ja: Translations = {
     licenseRequired: '続行するにはライセンスまたはトライアルが必要です',
     activated: '認証日: {date}',
     platform: 'プラットフォーム: {platform}',
-    // New translations
     needLicense: 'ライセンスが必要ですか？',
     openPurchasePage: '購入ページをブラウザで開きますか？',
     networkRequired: 'トライアル開始にはネットワーク接続が必要です。',

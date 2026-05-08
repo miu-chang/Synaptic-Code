@@ -45,7 +45,34 @@ export const blenderExecuteTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'blender_execute',
-      description: 'Execute a Blender tool. Use this to control Blender - create objects, modify scenes, render, etc. Call blender_list_tools first to see available tools.',
+      description: `Execute a Blender tool via HTTP. Sends {"tool": "<name>", "params": {...}} to Blender's server.
+
+## WORKFLOW — ALWAYS follow this order:
+1. blender_search_tools("keyword") — find the right tool by keyword
+2. blender_list_tools(category) — get tool schemas with required params
+3. blender_execute(tool, params) — execute with ALL required params
+
+## Common Tools & Params:
+Object: create_cube {name, size, location}, create_sphere {name, radius}, delete_object {name}, set_location {name, x, y, z}
+Mesh: create_mesh_from_data {name, vertices, faces} — for complex/organic shapes
+Material: create_material {name, color}, assign_material {object, material}
+Modifier: add_modifier {object, type, properties}
+
+## Animation (IMPORTANT — armature is ALWAYS required):
+1. detect_avatar_parts {} → returns armature name (call FIRST)
+2. ai_get_motion_prompt {} → get bone reference guide
+3. ai_apply_motion {motion_data, armature} → apply motion (recommended)
+OR manual: insert_bone_keyframe {armature, bone_name, frame, location, rotation}
+OR batch: animate_bones_batch {armature, keyframes: [{bone, frame, location}]}
+
+## 3D Modeling Guide:
+Complex shapes → create_mesh_from_data with math-generated vertices (sin, cos → vertex positions → face indices).
+DO NOT just place primitives. Use subdivision modifier for smoothness.
+
+## Effects / VFX Guide:
+Static effects (lightning, rain, magic circle): parametric math → create_mesh_from_data → emission material. Same as organic modeling.
+Dynamic effects: create_particle_effect (moving particles), add_force_field (wind/vortex), build_geometry_nodes (procedural).
+DO NOT use primitives for effects.`,
       parameters: {
         type: 'object',
         properties: {
@@ -55,7 +82,7 @@ export const blenderExecuteTool: ToolHandler = {
           },
           params: {
             type: 'object',
-            description: 'Parameters to pass to the tool',
+            description: 'Parameters object — check blender_list_tools/unity_list_tools for required params per tool',
             additionalProperties: true,
           },
         },
@@ -87,13 +114,22 @@ export const unityExecuteTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'unity_execute',
-      description: `Execute a Unity tool. Common tools:
-- unity_create_gameobject: Create objects. params: {name: string, type: "cube"|"sphere"|"cylinder"|"plane"|"capsule"|"empty", position?: {x,y,z}}
-- unity_delete_gameobject: Delete object. params: {name: string}
-- unity_set_transform: Move/rotate/scale. params: {gameObject: string, position?: {x,y,z}, rotation?: {x,y,z}, scale?: {x,y,z}}
-- unity_get_scene_summary: Get scene info (lightweight)
-- unity_get_gameobject_detail: Get object details. params: {nameOrId: string}
-Call unity_list_tools for full list.`,
+      description: `Execute a Unity tool via HTTP. Sends {"tool": "<name>", "params": {...}} to Unity's server.
+
+## WORKFLOW:
+1. unity_list_tools(category) — get tool schemas with required params
+2. unity_execute(tool, params) — execute with required params
+
+## Common Tools & Params:
+Scene: unity_get_scene_summary {} — lightweight scene overview (use this first)
+GameObject: unity_create_gameobject {name, type: "cube"|"sphere"|"cylinder"|"plane"|"capsule"|"empty", position?: {x,y,z}}
+Delete: unity_delete_gameobject {name}
+Transform: unity_set_transform {gameObject, position?: {x,y,z}, rotation?: {x,y,z}, scale?: {x,y,z}}
+Detail: unity_get_gameobject_detail {nameOrId}
+Component: unity_add_component {gameObject, componentType} — e.g. "Rigidbody", "BoxCollider"
+Script: unity_create_script {name, code, attachTo?}
+Prefab: unity_instantiate_prefab {assetPath, name?, position?}
+Material: unity_set_material {gameObject, color?, shader?}`,
       parameters: {
         type: 'object',
         properties: {
@@ -128,6 +164,50 @@ Call unity_list_tools for full list.`,
 };
 
 /**
+ * Tool to search Blender tools by keyword
+ */
+export const blenderSearchToolsTool: ToolHandler = {
+  definition: {
+    type: 'function',
+    function: {
+      name: 'blender_search_tools',
+      description: 'Search Blender tools by keyword. Searches tool names, descriptions, and parameter names. Use this when you know what you want to do but not which category or tool name to use.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Search keyword (e.g., "motion", "mesh", "material", "weight", "animation")',
+          },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  async execute(args) {
+    const { query } = args as { query: string };
+
+    if (!client.isServerConnected('blender')) {
+      return JSON.stringify({ error: 'Blender is not connected' });
+    }
+
+    const tools = await client.searchTools('blender', query);
+    const toolsInfo = tools.map(t => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.inputSchema?.properties
+        ? Object.entries(t.inputSchema.properties).map(([k, v]) => ({
+            name: k,
+            ...(v as Record<string, unknown>),
+            required: t.inputSchema?.required?.includes(k) ?? false,
+          }))
+        : [],
+    }));
+    return JSON.stringify({ query, tools: toolsInfo, count: toolsInfo.length });
+  },
+};
+
+/**
  * Tool to list available Blender tools/categories
  */
 export const blenderListToolsTool: ToolHandler = {
@@ -135,37 +215,21 @@ export const blenderListToolsTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'blender_list_tools',
-      description: `List available Blender tools by category. Main categories:
-- Object: Create/delete/transform objects
-- Mesh: Edit vertices, edges, faces
-- MeshCleanup/MeshAnalysis: Clean geometry, analyze topology
-- Transform: Move, rotate, scale
-- Modifiers: Subdivision, mirror, etc.
-- Materials: PBR materials setup
-- Texture/TextureMat: Texture operations
-- UV: UV mapping, unwrap
-- Armature: Bones, rigging
-- WeightPainting/WeightFeedback: Vertex weights
-- Animation/AnimationExt/AnimationFeedback: Keyframes, NLA
-- ShapeKeys: Blend shapes
-- Camera: Camera setup
-- Lighting: Lights, HDRI
-- Rendering: Render settings
-- Scene: Scene management
-- Batch: Batch operations
-- ImportExport: FBX, OBJ, GLTF
-- VRMExport: VRM export
-- AvatarEdit/BodyMod: Avatar editing
-- ClothingFitting: Clothing transfer
-- AccessoryHair: Hair accessories
-- Baking/AuxiliaryMaps: Texture baking
-- GameDev: Game development tools
-- Procedural: Procedural generation
-- RiggingFeedback: Rigging analysis
-- SmartOperations: Smart auto tools
-- StateDiff/Inspection: State comparison
-- VisualFeedback/CustomView: Visual helpers
-- WorkflowGuide/RegionFocus: Workflow assistance
+      description: `List available Blender tools by category. Categories:
+- Object: Create/delete/transform objects (25 tools)
+- Mesh: Edit vertices, edges, faces, cleanup, analysis (48 tools)
+- Modifiers: Subdivision, mirror, boolean, etc. (24 tools)
+- Material: PBR materials, textures, nodes (35 tools)
+- Animation: Keyframes, NLA, AI motion generation (VRM full-body + fingers + expressions) (38 tools)
+- Rigging: Armature, bones, weight painting (37 tools)
+- UV: UV mapping, unwrap, layout (29 tools)
+- Scene: Scene management, lighting, camera (25 tools)
+- Rendering: Render settings, baking, auxiliary maps (24 tools)
+- ImportExport: FBX, OBJ, GLTF, VRM import/export (26 tools)
+- Procedural: Procedural generation, advanced modeling (18 tools)
+- Avatar: Avatar editing, body mod, clothing, hair, shape keys (83 tools)
+- Utility: Batch ops, transform, inspection, workflow guide (92 tools)
+- AI: AI 3D model generation via Replicate API (ticket-based)
 Use category parameter for full tool schemas.`,
       parameters: {
         type: 'object',
@@ -434,6 +498,7 @@ export function getSynapticTools(): ToolHandler[] {
   if (client.isServerConnected('blender')) {
     tools.push(blenderExecuteTool);
     tools.push(blenderListToolsTool);
+    tools.push(blenderSearchToolsTool);
   }
 
   if (client.isServerConnected('unity')) {

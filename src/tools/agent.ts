@@ -12,7 +12,7 @@ export interface SubAgentStatus {
   id: string;
   goal: string;
   status: AgentState['status'];
-  currentStep: string;  // One-line description of current action
+  currentStep: string;
   iterations: number;
   startedAt: number;
   result?: string;
@@ -44,9 +44,9 @@ interface SubAgentTracker {
   tools: ToolRegistry | null;
   maxConcurrent: number;
   runningAgents: Map<string, Agent>;
-  statuses: Map<string, SubAgentStatus>;  // For UI
-  completionQueue: AgentCompletion[];     // For LLM notification
-  sharedContext: Map<string, SharedContext>;  // Agent result sharing
+  statuses: Map<string, SubAgentStatus>;
+  completionQueue: AgentCompletion[];
+  sharedContext: Map<string, SharedContext>;
   onStatusUpdate?: (statuses: Map<string, SubAgentStatus>) => void;
   onCompletion?: (completion: AgentCompletion) => void;
 }
@@ -98,26 +98,10 @@ export function getSubAgentStatuses(): Map<string, SubAgentStatus> {
 }
 
 /**
- * Get and clear completion queue (for injecting into LLM context)
+ * Pop pending completions (consumed by UI on poll)
  */
 export function popCompletions(): AgentCompletion[] {
-  const completions = [...tracker.completionQueue];
-  tracker.completionQueue = [];
-  return completions;
-}
-
-/**
- * Check if there are pending completions
- */
-export function hasCompletions(): boolean {
-  return tracker.completionQueue.length > 0;
-}
-
-/**
- * Get running agent count
- */
-export function getRunningCount(): number {
-  return tracker.runningAgents.size;
+  return tracker.completionQueue.splice(0, tracker.completionQueue.length);
 }
 
 /**
@@ -143,13 +127,6 @@ export function getSharedContext(key?: string): SharedContext[] {
   return Array.from(tracker.sharedContext.values());
 }
 
-/**
- * Clear shared context
- */
-export function clearSharedContext(): void {
-  tracker.sharedContext.clear();
-}
-
 // Helper: Update status and notify
 function updateStatus(id: string, update: Partial<SubAgentStatus>): void {
   const current = tracker.statuses.get(id);
@@ -163,7 +140,6 @@ function updateStatus(id: string, update: Partial<SubAgentStatus>): void {
 // Helper: Format step as one-line status
 function formatStepStatus(step: AgentStep): string {
   if (step.toolName) {
-    // Extract key info from tool call
     const toolInfo = step.toolName;
     const content = step.content.slice(0, 40);
     return `${toolInfo}: ${content}`;
@@ -178,17 +154,7 @@ const spawnAgentTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'spawn_agent',
-      description: `Spawn a sub-agent to handle a task autonomously in the background.
-
-The sub-agent runs independently and you'll be automatically notified when it completes.
-NO NEED to call check_agent - completions are reported automatically.
-
-Use cases:
-- Parallel tasks: spawn agents for independent work
-- Research: spawn agent to gather info while you continue
-- Complex sub-tasks: delegate portions of the goal
-
-Limits: Max ${tracker.maxConcurrent} concurrent agents. Sub-agents get 15 iterations max.`,
+      description: `Spawn a sub-agent for autonomous background work. Auto-notifies on completion. Max ${tracker.maxConcurrent} concurrent, 15 iterations each.`,
       parameters: {
         type: 'object',
         properties: {
@@ -225,14 +191,12 @@ Limits: Max ${tracker.maxConcurrent} concurrent agents. Sub-agents get 15 iterat
       });
     }
 
-    // Create sub-agent with explicit sub-agent flag
     const subAgent = new Agent(tracker.client, tracker.model, tracker.tools, {
       maxIterations: 15,
       stopOnError: false,
-      isSubAgent: true,  // Enables stricter completion prompting
+      isSubAgent: true,
     });
 
-    // Initialize status
     const status: SubAgentStatus = {
       id: agentId,
       goal,
@@ -245,7 +209,6 @@ Limits: Max ${tracker.maxConcurrent} concurrent agents. Sub-agents get 15 iterat
     tracker.runningAgents.set(agentId, subAgent);
     tracker.onStatusUpdate?.(tracker.statuses);
 
-    // Track steps in real-time
     subAgent.onStep((step, state) => {
       updateStatus(agentId, {
         currentStep: formatStepStatus(step),
@@ -254,11 +217,9 @@ Limits: Max ${tracker.maxConcurrent} concurrent agents. Sub-agents get 15 iterat
       });
     });
 
-    // Run async and handle completion
     subAgent.run(goal).then((finalState) => {
       tracker.runningAgents.delete(agentId);
 
-      // Update final status
       updateStatus(agentId, {
         status: finalState.status,
         currentStep: finalState.status === 'completed'
@@ -268,7 +229,6 @@ Limits: Max ${tracker.maxConcurrent} concurrent agents. Sub-agents get 15 iterat
         error: finalState.error,
       });
 
-      // Queue completion for LLM
       const completion: AgentCompletion = {
         agentId,
         status: finalState.status as 'completed' | 'failed' | 'cancelled',
@@ -280,7 +240,6 @@ Limits: Max ${tracker.maxConcurrent} concurrent agents. Sub-agents get 15 iterat
       tracker.completionQueue.push(completion);
       tracker.onCompletion?.(completion);
 
-      // Clean up status after a delay
       setTimeout(() => {
         tracker.statuses.delete(agentId);
         tracker.onStatusUpdate?.(tracker.statuses);
@@ -337,13 +296,7 @@ const shareResultTool: ToolHandler = {
     type: 'function',
     function: {
       name: 'share_result',
-      description: `Share data/results with other agents. Use this to pass information between parallel agents.
-
-Examples:
-- share_result("api_docs", "The API uses REST with JSON...", "research-agent")
-- share_result("file_list", "main.ts, utils.ts, config.ts", "scanner")
-
-Other agents can read this with get_shared_results.`,
+      description: 'Share data between parallel agents. Other agents read with get_shared_results.',
       parameters: {
         type: 'object',
         properties: {

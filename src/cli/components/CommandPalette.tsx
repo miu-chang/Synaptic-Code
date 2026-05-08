@@ -27,7 +27,12 @@ const COMMAND_DEFINITIONS: Command[] = [
   { name: 'self', descriptionKey: 'self' },
   { name: 'timeline', descriptionKey: 'timeline' },
   { name: 'diff', descriptionKey: 'diff' },
+  { name: 'memory', descriptionKey: 'memory' },
+  { name: 'voice', descriptionKey: 'voice', shortcut: 'v' },
+  { name: 'update', descriptionKey: 'update' },
   { name: 'changelog', descriptionKey: 'changelog' },
+  { name: 'reasoning', descriptionKey: 'reasoning', shortcut: 'r' },
+  { name: 'context', descriptionKey: 'context' },
   { name: 'quit', descriptionKey: 'quit', shortcut: 'q' },
 ];
 

@@ -21,7 +21,7 @@ export const bashTool: ToolHandler = {
           },
           timeout: {
             type: 'number',
-            description: 'Timeout in milliseconds (default: 30000)',
+            description: 'Timeout in milliseconds (default: 300000)',
           },
         },
         required: ['command'],
@@ -29,7 +29,7 @@ export const bashTool: ToolHandler = {
     },
   },
   async execute(args) {
-    const { command, cwd = process.cwd(), timeout = 30000 } = args as {
+    const { command, cwd = process.cwd(), timeout = 300000 } = args as {
       command: string;
       cwd?: string;
       timeout?: number;
@@ -54,11 +54,10 @@ export const bashTool: ToolHandler = {
     }
 
     return new Promise((resolve) => {
-      const proc = spawn('bash', ['-c', command], {
-        cwd,
-        env: { ...process.env },
-        timeout,
-      });
+      const isWin = process.platform === 'win32';
+      const proc = isWin
+        ? spawn('cmd.exe', ['/c', command], { cwd, env: { ...process.env }, timeout })
+        : spawn('bash', ['-c', command], { cwd, env: { ...process.env }, timeout });
 
       let stdout = '';
       let stderr = '';
@@ -130,11 +129,10 @@ export const bashBackgroundTool: ToolHandler = {
       cwd?: string;
     };
 
-    const proc = spawn('bash', ['-c', command], {
-      cwd,
-      detached: true,
-      stdio: 'ignore',
-    });
+    const isWin = process.platform === 'win32';
+    const proc = isWin
+      ? spawn('cmd.exe', ['/c', command], { cwd, detached: true, stdio: 'ignore' })
+      : spawn('bash', ['-c', command], { cwd, detached: true, stdio: 'ignore' });
 
     proc.unref();
 

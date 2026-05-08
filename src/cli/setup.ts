@@ -34,7 +34,7 @@ interface RecommendedModel {
 }
 
 // Model definitions without descriptions (descriptions come from i18n)
-type ModelDescKey = 'qwen35_35b' | 'gptOss20b' | 'qwen35_14b' | 'gemma3_12b' | 'qwen35_9b' | 'gemma3_4b' | 'qwen35_27b' | 'qwen35_122b' | 'llama4Maverick' | 'deepseekR1';
+type ModelDescKey = 'qwen36_35b' | 'gemma4_26b' | 'gptOss20b' | 'qwen35_14b' | 'qwen35_9b' | 'qwen35_4b' | 'nemotronNano4b' | 'qwen35_27b' | 'qwen35_122b' | 'llama4Maverick' | 'deepseekR1';
 
 interface ModelDef {
   id: string;
@@ -46,20 +46,21 @@ interface ModelDef {
 
 // Main recommendations - balanced for speed and quality
 const MODEL_DEFS: ModelDef[] = [
-  { id: 'qwen3.5-35b-a3b', name: 'Qwen 3.5 35B-A3B', minRam: 24, url: 'https://lmstudio.ai/models/qwen/qwen3.5-35b-a3b', descKey: 'qwen35_35b' },
-  { id: 'gpt-oss-20b', name: 'GPT-OSS 20B', minRam: 20, url: 'https://lmstudio.ai/models/openai/gpt-oss-20b', descKey: 'gptOss20b' },
-  { id: 'qwen3.5-14b', name: 'Qwen 3.5 14B', minRam: 16, url: 'https://lmstudio.ai/models/qwen/qwen3.5-14b', descKey: 'qwen35_14b' },
-  { id: 'gemma-3-12b', name: 'Gemma 3 12B', minRam: 14, url: 'https://lmstudio.ai/models/google/gemma-3-12b', descKey: 'gemma3_12b' },
-  { id: 'qwen3.5-9b', name: 'Qwen 3.5 9B', minRam: 12, url: 'https://lmstudio.ai/models/qwen/qwen3.5-9b', descKey: 'qwen35_9b' },
-  { id: 'gemma-3-4b', name: 'Gemma 3 4B', minRam: 8, url: 'https://lmstudio.ai/models/google/gemma-3-4b', descKey: 'gemma3_4b' },
+  { id: 'qwen/qwen3.6-35b-a3b', name: 'Qwen 3.6 35B-A3B', minRam: 24, url: 'https://lmstudio.ai/models/qwen/qwen3.6-35b-a3b', descKey: 'qwen36_35b' },
+  { id: 'google/gemma-4-26b-a4b', name: 'Gemma 4 26B-A4B', minRam: 24, url: 'https://lmstudio.ai/models/google/gemma-4-26b-a4b', descKey: 'gemma4_26b' },
+  { id: 'openai/gpt-oss-20b', name: 'GPT-OSS 20B', minRam: 20, url: 'https://lmstudio.ai/models/openai/gpt-oss-20b', descKey: 'gptOss20b' },
+  { id: 'qwen/qwen3.5-14b', name: 'Qwen 3.5 14B', minRam: 16, url: 'https://lmstudio.ai/models/qwen/qwen3.5-14b', descKey: 'qwen35_14b' },
+  { id: 'qwen/qwen3.5-9b', name: 'Qwen 3.5 9B', minRam: 12, url: 'https://lmstudio.ai/models/qwen/qwen3.5-9b', descKey: 'qwen35_9b' },
+  { id: 'qwen/qwen3.5-4b', name: 'Qwen 3.5 4B', minRam: 6, url: 'https://lmstudio.ai/models/qwen/qwen3.5-4b', descKey: 'qwen35_4b' },
+  { id: 'nvidia/nemotron-nano-4b', name: 'Nemotron Nano 4B', minRam: 6, url: 'https://lmstudio.ai/models/nvidia/nemotron-nano-4b', descKey: 'nemotronNano4b' },
 ];
 
 // Optional advanced models (slower but higher quality)
 const OPTIONAL_MODEL_DEFS: ModelDef[] = [
-  { id: 'qwen3.5-27b', name: 'Qwen 3.5 27B (Dense)', minRam: 48, url: 'https://lmstudio.ai/models/qwen/qwen3.5-27b', descKey: 'qwen35_27b' },
-  { id: 'qwen3.5-122b-a10b', name: 'Qwen 3.5 122B-A10B', minRam: 80, url: 'https://lmstudio.ai/models/qwen/qwen3.5-122b-a10b', descKey: 'qwen35_122b' },
-  { id: 'llama-4-maverick', name: 'Llama 4 Maverick 400B', minRam: 250, url: 'https://lmstudio.ai/models/meta/llama-4-maverick', descKey: 'llama4Maverick' },
-  { id: 'deepseek-r1', name: 'DeepSeek R1 671B', minRam: 400, url: 'https://lmstudio.ai/models/deepseek/deepseek-r1', descKey: 'deepseekR1' },
+  { id: 'qwen/qwen3.5-27b', name: 'Qwen 3.5 27B (Dense)', minRam: 48, url: 'https://lmstudio.ai/models/qwen/qwen3.5-27b', descKey: 'qwen35_27b' },
+  { id: 'qwen/qwen3.5-122b-a10b', name: 'Qwen 3.5 122B-A10B', minRam: 80, url: 'https://lmstudio.ai/models/qwen/qwen3.5-122b-a10b', descKey: 'qwen35_122b' },
+  { id: 'meta/llama-4-maverick', name: 'Llama 4 Maverick 400B', minRam: 250, url: 'https://lmstudio.ai/models/meta/llama-4-maverick', descKey: 'llama4Maverick' },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1 671B', minRam: 400, url: 'https://lmstudio.ai/models/deepseek/deepseek-r1', descKey: 'deepseekR1' },
 ];
 
 // Build models with translated descriptions
@@ -146,7 +147,7 @@ function isCliInstalled(): boolean {
 /**
  * Check if LM Studio app is installed (not just CLI)
  */
-function isLmStudioAppInstalled(): boolean {
+export function isLmStudioAppInstalled(): boolean {
   if (DEBUG_FORCE_NOT_INSTALLED) return false;
 
   const os = platform();
@@ -761,13 +762,85 @@ async function setupLicense(): Promise<boolean> {
 /**
  * Step 4: Connection test
  */
+async function setupWhisper(llmModel?: string | null): Promise<void> {
+  const { detectSystemSpecs } = await import('../config/settings.js');
+  const { getWhisperRecommendation, isWhisperInstalled, installWhisper } = await import('../core/whisper.js');
+  const { isRecordingAvailable, installRecordingTool } = await import('../core/mic.js');
+  const oraMod = await import('ora');
+  const ora = oraMod.default;
+  const osMod = await import('os');
+
+  console.log(chalk.bold('\n━━━ Voice Input Setup ━━━\n'));
+
+  const recTool = isRecordingAvailable();
+  if (recTool.available) {
+    console.log(chalk.green(`  ✓ Recording tool: ${recTool.tool} (${recTool.path || 'in PATH'})`));
+  } else {
+    console.log(chalk.yellow(`  Recording tool (${recTool.tool}) not found`));
+    const installRec = await askYesNo(`  Install ${recTool.tool}? (${recTool.installHint})`);
+    if (installRec) {
+      const spinner = ora({ text: `Installing ${recTool.tool}...`, indent: 2 }).start();
+      const result = await installRecordingTool();
+      if (result.success) {
+        spinner.succeed(`${recTool.tool} installed`);
+      } else {
+        spinner.fail(result.message);
+        console.log(chalk.dim(`  Manual install: ${recTool.installHint}`));
+        console.log(chalk.dim('  Voice input will not be available without a recording tool.\n'));
+        return;
+      }
+    } else {
+      console.log(chalk.dim(`  Skipped. Install manually: ${recTool.installHint}\n`));
+      return;
+    }
+  }
+
+  const specs = detectSystemSpecs();
+  const rec = getWhisperRecommendation(specs, llmModel || undefined);
+  console.log(chalk.dim(`  ${rec.reasoning.split('\n').join('\n  ')}`));
+  console.log();
+
+  if (isWhisperInstalled(rec.config.backend)) {
+    console.log(chalk.green(`  ✓ ${rec.config.backend} already installed`));
+    console.log(chalk.dim(`  Recommended model: ${rec.config.model} (${rec.config.description})`));
+    return;
+  }
+
+  const install = await askYesNo(`  Install speech recognition (${rec.config.backend})?`);
+  if (!install) {
+    console.log(chalk.dim('  Skipped. You can install later with: synaptic setup'));
+    return;
+  }
+
+  const spinner = ora({ text: `Installing ${rec.config.backend}...`, indent: 2 }).start();
+  const result = await installWhisper(rec.config.backend, (msg: string) => {
+    spinner.text = msg;
+  });
+  if (result.success) {
+    spinner.succeed(`${rec.config.backend} installed`);
+    console.log(chalk.dim(`  Recommended model: ${rec.config.model} (${rec.config.description})`));
+    console.log(chalk.dim('  Model will be downloaded on first use.'));
+  } else {
+    spinner.fail(`Installation failed: ${result.message}`);
+    const pipCmd = osMod.platform() === 'win32' ? 'pip' : 'pip3';
+    console.log(chalk.dim(`  Manual install: ${pipCmd} install lightning-whisper-mlx`));
+  }
+}
+
 async function testConnection(model?: string | null): Promise<boolean> {
   console.log(chalk.bold(`\n━━━ ${t().setup.step4Title} ━━━\n`));
 
   const spinner = ora(t().setup.testingConnection).start();
 
   try {
-    const response = await fetch('http://localhost:1234/v1/chat/completions', {
+    const baseUrl = await lms.getLmStudioUrl();
+    if (!baseUrl) {
+      spinner.fail(t().setup.serverNotResponding);
+      return false;
+    }
+    const port = lms.getDetectedPort();
+    spinner.text = `Testing connection to LM Studio (port ${port})...`;
+    const response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -781,7 +854,7 @@ async function testConnection(model?: string | null): Promise<boolean> {
     if (response.ok) {
       const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
       const reply = data.choices?.[0]?.message?.content || '';
-      spinner.succeed(format(t().setup.aiResponded, { response: reply.trim() }));
+      spinner.succeed(format(t().setup.aiResponded, { response: reply.trim() }) + chalk.dim(` (port ${port})`));
       return true;
     } else {
       spinner.fail(format(t().setup.serverError, { status: String(response.status) }));
@@ -801,6 +874,10 @@ function completeSetup(model?: string | null): void {
   settings.firstRun = false;
   if (model) {
     settings.providers.lmstudio.model = model;
+  }
+  const detectedPort = lms.getDetectedPort();
+  if (detectedPort && detectedPort !== 1234) {
+    settings.providers.lmstudio.baseUrl = `http://localhost:${detectedPort}/v1`;
   }
   saveSettings(settings);
 }
@@ -856,7 +933,12 @@ export async function runSetupWizard(): Promise<boolean> {
     selectedModel = await setupModel();
   }
 
-  // Step 4: Test
+  // Step 4: Whisper / voice input setup
+  if (lmStudioOk || DEBUG_FORCE_NOT_INSTALLED) {
+    await setupWhisper(selectedModel);
+  }
+
+  // Step 5: Test
   let testOk = false;
   if (selectedModel || await lms.isServerRunning() || DEBUG_FORCE_NOT_INSTALLED) {
     testOk = await testConnection(selectedModel);

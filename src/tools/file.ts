@@ -121,7 +121,23 @@ export const readFileTool: ToolHandler = {
     }
 
     try {
-      const content = readFileSync(fullPath, 'utf-8');
+      const isPdf = fullPath.toLowerCase().endsWith('.pdf');
+      let content: string;
+      if (isPdf) {
+        const buf = readFileSync(fullPath);
+        try {
+          const { PDFParse } = await import('pdf-parse');
+          const parser = new PDFParse({ data: new Uint8Array(buf) });
+          const result = await parser.getText();
+          content = result.text || '';
+        } catch (e) {
+          return JSON.stringify({
+            error: `Failed to read PDF: ${e instanceof Error ? e.message : String(e)}. Install pdf-parse: npm i pdf-parse`,
+          });
+        }
+      } else {
+        content = readFileSync(fullPath, 'utf-8');
+      }
       const lines = content.split('\n');
       const start = Math.max(0, offset - 1);
       const end = limit ? start + limit : lines.length;

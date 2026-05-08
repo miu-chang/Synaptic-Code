@@ -295,6 +295,13 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
     settingsRef.current = settings;
   }, [settings]);
 
+  // Voice mode state
+  const [voiceMode, setVoiceMode] = useState(false);
+  const voiceModeRef = useRef(false);
+  const voiceSessionRef = useRef<{ cancel: () => void; stop: () => Promise<string> } | null>(null);
+  const voiceResolveRef = useRef<string | null>(null);
+  void voiceMode;
+
   // Set initial terminal title and activity indicator
   useEffect(() => {
     setTerminalTitle('Synaptic Code');
@@ -348,6 +355,25 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
       },
     });
     tools.registerMultiple(agentTools);
+
+    // Register memory tools (dynamic import to keep startup snappy)
+    import('../../tools/memory.js').then(({ memoryTools }) => {
+      tools.registerMultiple(memoryTools);
+    }).catch(() => {});
+
+    // Register chrome tools after starting embedded bridge server
+    import('../../tools/chrome.js').then(async ({ chromeTools, isBridgeConnected, startBridgeServer }) => {
+      await startBridgeServer();
+      // Wait up to ~12s (6 * 2s) for bridge connection
+      for (let i = 0; i < 6; i++) {
+        if (await isBridgeConnected()) {
+          tools.registerMultiple(chromeTools);
+          setMessages((prev) => [...prev, { type: 'info', content: 'Chrome browser bridge connected (port 19222)' }]);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }).catch(() => {});
 
     // Listen for LMS download progress
     const handleLmsProgress = (progress: LmsDownloadProgress) => {
@@ -483,6 +509,7 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
         model: getProviderModel(settings),
         messages: conversationManager.getContextMessages(),
         tools: tools.getDefinitions(),
+        ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
       },
       (chunk) => {
         fullResponse += chunk;
@@ -532,6 +559,7 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
           model: getProviderModel(settings),
           messages: conversationManager.getContextMessages(),
           tools: tools.getDefinitions(),
+          ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
         },
         (chunk) => {
           fullResponse += chunk;
@@ -768,6 +796,7 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
           model: getProviderModel(settings),
           messages: contextMessages,
           tools: tools.getDefinitions(),
+          ...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
         },
         (chunk) => {
           fullResponse += chunk;
@@ -1100,6 +1129,283 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
         });
         break;
 
+      case 'update':
+      case 'upgrade': {
+        addMessage({ type: 'info', content: 'アップデートを確認中...' });
+        try {
+          const { checkForUpdates } = await import('../../version/index.js');
+          const { performUpdate } = await import('../../version/updater.js');
+          const info = await checkForUpdates();
+          if (!info) {
+            addMessage({ type: 'error', content: 'バージョン情報の取得に失敗しました' });
+            break;
+          }
+          if (!info.updateAvailable) {
+            addMessage({
+              type: 'info',
+              content: `最新バージョン (v${info.currentVersion}) を使用中です`,
+            });
+            break;
+          }
+          addMessage({
+            type: 'info',
+            content: `v${info.currentVersion} → v${info.latestVersion} にアップデートします...`,
+          });
+          const result = await performUpdate((msg: string) => {
+            addMessage({ type: 'info', content: msg });
+          });
+          if (result.success) {
+            addMessage({
+              type: 'info',
+              content: `${result.message}\n再起動してください。`,
+            });
+          } else {
+            addMessage({
+              type: 'error',
+              content: `アップデート失敗: ${result.message}`,
+            });
+          }
+        } catch (err) {
+          addMessage({
+            type: 'error',
+            content: `アップデートエラー: ${err instanceof Error ? err.message : String(err)}`,
+          });
+        }
+        break;
+      }
+
+      case 'memory':
+      case 'mem': {
+        try {
+          const { getLanguage } = await import('../../i18n/index.js');
+          const isJa = getLanguage() === 'ja';
+          const {
+            listMemories,
+            readMemory,
+            deleteMemory,
+            getMemoryPath,
+            setMemoryEnabled,
+            isMemoryEnabled,
+          } = await import('../../core/memory.js');
+          const memories = listMemories();
+          const memPath = getMemoryPath();
+
+          if (args[0] === 'on') {
+            setMemoryEnabled(true);
+            addMessage({ type: 'info', content: isJa ? 'メモリ記録: ON（学習モード）' : 'Memory recording: ON (learning mode)' });
+            break;
+          }
+          if (args[0] === 'off') {
+            setMemoryEnabled(false);
+            addMessage({ type: 'info', content: isJa ? 'メモリ記録: OFF（通常モード — 記憶しません）' : 'Memory recording: OFF (normal mode — no memorization)' });
+            break;
+          }
+          if (args[0] === 'clear') {
+            for (const m of memories) {
+              deleteMemory(m.name);
+            }
+            addMessage({ type: 'info', content: isJa ? `${memories.length}件のメモリを削除しました` : `Deleted ${memories.length} memories` });
+            break;
+          }
+          if (args[0] === 'delete' && args[1]) {
+            const result = deleteMemory(args.slice(1).join(' '));
+            addMessage({ type: result.success ? 'info' : 'error', content: result.message });
+            break;
+          }
+          if (args[0] === 'show' && args[1]) {
+            const entry = readMemory(args.slice(1).join(' '));
+            if (entry) {
+              addMessage({ type: 'info', content: `[${entry.type}] ${entry.name}\n${entry.description}\n---\n${entry.content}` });
+            } else {
+              addMessage({ type: 'error', content: isJa ? 'メモリが見つかりません' : 'Memory not found' });
+            }
+            break;
+          }
+
+          const modeStr = isMemoryEnabled()
+            ? (isJa ? 'ON（学習モード）' : 'ON (learning)')
+            : (isJa ? 'OFF（通常モード）' : 'OFF (normal)');
+
+          if (memories.length === 0) {
+            addMessage({
+              type: 'info',
+              content: isJa
+                ? `メモリ記録: ${modeStr}\nメモリなし\n\n保存先: ${memPath}\nAIが自動で保存するか、memory_saveツールで手動保存できます\n\nプロジェクト固有の指示は SYNAPTIC.md に記述してください:\n  synaptic/SYNAPTIC.md または SYNAPTIC.md\n\nコマンド: /memory on|off, show <name>, delete <name>, clear`
+                : `Memory: ${modeStr}\nNo memories saved\n\nPath: ${memPath}\nAI saves automatically, or use memory_save tool\n\nFor project instructions, create SYNAPTIC.md:\n  synaptic/SYNAPTIC.md or SYNAPTIC.md\n\nCommands: /memory on|off, show <name>, delete <name>, clear`,
+            });
+          } else {
+            const lines = memories.map(m => `  [${m.type}] ${m.name} — ${m.description}`);
+            addMessage({
+              type: 'info',
+              content: isJa
+                ? `メモリ記録: ${modeStr}\n保存済みメモリ (${memories.length}件):\n${lines.join('\n')}\n\n保存先: ${memPath}\nコマンド: /memory on|off, show <name>, delete <name>, clear`
+                : `Memory: ${modeStr}\nSaved memories (${memories.length}):\n${lines.join('\n')}\n\nPath: ${memPath}\nCommands: /memory on|off, show <name>, delete <name>, clear`,
+            });
+          }
+        } catch (err) {
+          addMessage({ type: 'error', content: `メモリエラー: ${err instanceof Error ? err.message : String(err)}` });
+        }
+        break;
+      }
+
+      case 'voice':
+      case 'v': {
+        if (voiceModeRef.current) {
+          voiceModeRef.current = false;
+          setVoiceMode(false);
+          if (voiceSessionRef.current) {
+            voiceSessionRef.current.cancel();
+            voiceSessionRef.current = null;
+          }
+          addMessage({ type: 'info', content: t().messages.voiceModeOff });
+          break;
+        }
+        const {
+          isRecordingAvailable,
+          startRecording,
+          cleanupAudioFile,
+          isHallucination,
+          installRecordingTool,
+        } = await import('../../core/mic.js');
+        const {
+          selectWhisperModel,
+          transcribe,
+          isWhisperInstalled,
+          installWhisper,
+        } = await import('../../core/whisper.js');
+        const { detectSystemSpecs } = await import('../../config/settings.js');
+
+        let recCheck = isRecordingAvailable();
+        if (!recCheck.available) {
+          addMessage({ type: 'info', content: `Recording tool (${recCheck.tool}) not found. Installing...` });
+          const installResult = await installRecordingTool();
+          if (installResult.success) {
+            addMessage({ type: 'info', content: installResult.message });
+            recCheck = isRecordingAvailable();
+          } else {
+            addMessage({ type: 'error', content: `${installResult.message}\nManual install: ${recCheck.installHint}` });
+            break;
+          }
+          if (!recCheck.available) {
+            addMessage({ type: 'error', content: `Still not available. Try: ${recCheck.installHint}` });
+            break;
+          }
+        }
+
+        const specs = detectSystemSpecs();
+        const whisperConfig = selectWhisperModel(specs, getProviderModel(settingsRef.current));
+        if (!isWhisperInstalled(whisperConfig.backend)) {
+          addMessage({ type: 'info', content: `Installing ${whisperConfig.backend}...` });
+          const installResult = await installWhisper(whisperConfig.backend);
+          if (!installResult.success) {
+            addMessage({ type: 'error', content: installResult.message });
+            break;
+          }
+          addMessage({ type: 'info', content: installResult.message });
+        }
+
+        voiceModeRef.current = true;
+        setVoiceMode(true);
+        addMessage({ type: 'info', content: format(t().messages.voiceModeOn, { model: whisperConfig.model }) });
+
+        while (voiceModeRef.current) {
+          addMessage({ type: 'info', content: t().messages.voiceRecording });
+          const session = startRecording();
+          const audioPath = await new Promise<string | null>((resolve) => {
+            voiceSessionRef.current = session;
+            voiceResolveRef.current = null;
+            const checkInterval = setInterval(() => {
+              if (voiceResolveRef.current) {
+                clearInterval(checkInterval);
+                resolve(voiceResolveRef.current);
+                voiceResolveRef.current = null;
+              }
+              if (!voiceModeRef.current) {
+                clearInterval(checkInterval);
+                session.cancel();
+                resolve(null);
+              }
+            }, 100);
+          });
+          voiceSessionRef.current = null;
+          if (!voiceModeRef.current || !audioPath) {
+            break;
+          }
+          if (audioPath === '__skip__') {
+            addMessage({ type: 'info', content: t().messages.voiceSkipped });
+            continue;
+          }
+          addMessage({ type: 'info', content: t().messages.voiceTranscribing });
+          const result = await transcribe(audioPath, whisperConfig);
+          cleanupAudioFile(audioPath);
+          if (result.success && result.text) {
+            if (isHallucination(result.text)) {
+              addMessage({ type: 'info', content: t().messages.voiceNoSpeech });
+            } else {
+              addMessage({ type: 'info', content: `> "${result.text}"` });
+              await handleSubmit(result.text);
+              while (isLoading && voiceModeRef.current) {
+                await new Promise((r) => setTimeout(r, 200));
+              }
+            }
+          } else {
+            addMessage({ type: 'error', content: `Transcription failed: ${result.error}` });
+          }
+        }
+        voiceModeRef.current = false;
+        setVoiceMode(false);
+        addMessage({ type: 'info', content: t().messages.voiceModeOff });
+        break;
+      }
+
+      case 'reasoning':
+      case 'r': {
+        const arg = args.join(' ').trim().toLowerCase();
+        const validLevels = ['none', 'low', 'medium', 'high'];
+        if (!arg || !validLevels.includes(arg)) {
+          const current = (settings as { reasoningEffort?: string }).reasoningEffort || 'none';
+          addMessage({
+            type: 'info',
+            content: `推論モード: ${current}\n使い方: /reasoning <none|low|medium|high>`,
+          });
+          break;
+        }
+        const newSettings = { ...settings, reasoningEffort: arg === 'none' ? undefined : arg } as typeof settings;
+        saveSettings(newSettings);
+        setSettings(newSettings);
+        addMessage({
+          type: 'info',
+          content: arg === 'none' ? '推論モード: OFF（通常モード）' : `推論モード: ${arg.toUpperCase()}`,
+        });
+        break;
+      }
+
+      case 'context':
+      case 'ctx': {
+        const ctxArg = parseInt(args[0]);
+        if (!ctxArg || ctxArg < 1024) {
+          const currentCtx = Math.round(settings.maxContextTokens * 1.1);
+          addMessage({
+            type: 'info',
+            content: `Current context: ${currentCtx} tokens\nUsage: /context <size> (e.g. /context 16384, /context 32768)`,
+          });
+          break;
+        }
+        addMessage({ type: 'info', content: `Reloading model with context: ${ctxArg}...` });
+        try {
+          const currentModel = getProviderModel(settings);
+          const { loadModel: loadModelFn } = await import('../../lms/client.js');
+          await loadModelFn(currentModel, { contextLength: ctxArg });
+          const newSettings = { ...settings, maxContextTokens: Math.round(ctxArg / 1.1) };
+          setSettings(newSettings);
+          saveSettings(newSettings);
+          addMessage({ type: 'info', content: `Model reloaded with context: ${ctxArg} tokens` });
+        } catch (e) {
+          addMessage({ type: 'error', content: `Failed to reload: ${e instanceof Error ? e.message : String(e)}` });
+        }
+        break;
+      }
+
       case 'license':
         setViewMode('license');
         break;
@@ -1354,6 +1660,36 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
 
   // Global key handler
   useInput((input, key) => {
+    // Voice mode keypress handling (takes precedence)
+    if (voiceSessionRef.current) {
+      if (key.return) {
+        voiceSessionRef.current.stop().then((p) => {
+          voiceResolveRef.current = p;
+        });
+        return;
+      }
+      if (key.escape) {
+        const now = Date.now();
+        if (now - lastEscRef.current < DOUBLE_ESC_THRESHOLD) {
+          // Double Esc - exit voice mode entirely
+          voiceModeRef.current = false;
+          setVoiceMode(false);
+          voiceSessionRef.current.cancel();
+          voiceSessionRef.current = null;
+          voiceResolveRef.current = null;
+          lastEscRef.current = 0;
+        } else {
+          // Single Esc - skip current recording
+          lastEscRef.current = now;
+          voiceSessionRef.current.cancel();
+          voiceSessionRef.current = null;
+          voiceResolveRef.current = '__skip__';
+        }
+        return;
+      }
+      return;
+    }
+
     if (key.escape) {
       const now = Date.now();
 
@@ -1562,6 +1898,7 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
             openai: settings.cloudProviders?.openai?.apiKey,
             anthropic: settings.cloudProviders?.anthropic?.apiKey,
             google: settings.cloudProviders?.google?.apiKey,
+            xai: settings.cloudProviders?.xai?.apiKey,
           }}
           onSelect={handleProviderSelect}
           onClose={() => setViewMode('chat')}
@@ -1640,6 +1977,7 @@ export function App({ settings: initialSettings, client: initialClient, tools, l
         lastUsage={lastUsage}
         autoAccept={autoAccept}
         isLoading={isLoading}
+        reasoningEffort={settings.reasoningEffort ?? null}
       />
 
       {/* TODO bar - Claude Code style */}
